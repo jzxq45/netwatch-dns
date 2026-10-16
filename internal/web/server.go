@@ -22,6 +22,8 @@ import (
 // Store is the read surface the UI needs.
 type Store interface {
 	RecentEvents(ctx context.Context, limit int) ([]store.Event, error)
+	RecentEventsAll(ctx context.Context, limit int) ([]store.Event, error)
+	NoisyEventsSince(ctx context.Context, sinceTS int64) (int, error)
 	EventsSince(ctx context.Context, since int64, limit int) ([]store.Event, error)
 	DeviceByIP(ctx context.Context, ip string) (*store.DeviceRow, error)
 	DeviceEvents(ctx context.Context, ip string, limit int) ([]store.Event, error)
@@ -124,6 +126,11 @@ const pageTail = `</main></body></html>`
 
 const contentFeed = `
 <h2>Лента <span class="sub">последние {{len .Data.Events}}</span></h2>
+<p style="margin:.4rem 0">
+  {{if .Data.ShowAll}}<a class="chip link" href="/">✓ обычные</a><span class="chip" style="border-color:var(--accent)">шум и DoH-попытки</span> <a class="chip link" href="/">скрыть шум</a>
+  {{else}}<a class="chip link" href="/?show=all">показать шум</a>
+  {{if gt .Data.Hidden 0}}<span class="chip" title="noise=1 строки за окно ленты">🚫 {{.Data.Hidden}} шумных скрыто</span>{{end}}{{end}}
+</p>
 {{if .Data.Events}}
 <table>
   <thead><tr><th>Время</th><th></th><th>Устройство</th><th>Домен</th></tr></thead>
@@ -131,7 +138,7 @@ const contentFeed = `
     <td class="time" data-ts="{{.TS}}">{{tsfmt .TS}}</td>
     <td><span class="badge {{.Kind}}">{{.Kind}}</span></td>
     <td><a class="chip link" href="/device?ip={{.ClientIP}}">{{.ClientIP}}</a></td>
-    <td class="dom">{{.Name}}</td></tr>{{end}}</tbody>
+    <td class="dom">{{.Name}}{{if $.Data.ShowAll}}{{if .Noise}} <span class="badge blocked">noise</span>{{end}}{{end}}</td></tr>{{end}}</tbody>
 </table>
 {{else}}<div class="empty">Пока тихо — запросы появятся здесь, когда устройства начнут резолвить домены.</div>{{end}}`
 
@@ -212,14 +219,36 @@ func render(w http.ResponseWriter, status int, t *template.Template, path string
 }
 
 func (s *Server) feed(w http.ResponseWriter, r *http.Request) {
-	events, err := s.st.RecentEvents(r.Context(), feedLimit)
+	showAll := r.URL.Query().Get("show") == "all"
+	var (
+		events []store.Event
+		err    error
+	)
+	if showAll {
+		events, err = s.st.RecentEventsAll(r.Context(), feedLimit)
+	} else {
+		events, err = s.st.RecentEvents(r.Context(), feedLimit)
+	}
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	// Hidden-noise counter: noise rows at or after the oldest shown row.
+	hidden := 0
+	if len(events) > 0 {
+		if hidden, err = s.st.NoisyEventsSince(r.Context(), events[len(events)-1].TS); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if showAll {
+			hidden = 0
+		}
+	}
 	render(w, http.StatusOK, page(contentFeed), "/", struct {
-		Events []store.Event
-	}{events})
+		Events  []store.Event
+		ShowAll bool
+		Hidden  int
+	}{events, showAll, hidden})
 }
 
 func (s *Server) devices(w http.ResponseWriter, r *http.Request) {

@@ -32,7 +32,40 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
+	if err := ensureNoiseColumn(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate noise: %w", err)
+	}
 	return &Store{db: db}, nil
+}
+
+// ensureNoiseColumn adds dns_log.noise to databases created before the
+// noise-filtering feature. Idempotent: no-op when the column exists.
+func ensureNoiseColumn(db *sql.DB) error {
+	rows, err := db.Query(`PRAGMA table_info(dns_log)`)
+	if err != nil {
+		return fmt.Errorf("table_info: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull, pk int
+		var dflt any
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &dflt, &pk); err != nil {
+			return fmt.Errorf("scan table_info: %w", err)
+		}
+		if name == "noise" {
+			return nil // column already there
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate table_info: %w", err)
+	}
+	if _, err := db.Exec(`ALTER TABLE dns_log ADD COLUMN noise INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return fmt.Errorf("add noise column: %w", err)
+	}
+	return nil
 }
 
 func (s *Store) DB() *sql.DB { return s.db }

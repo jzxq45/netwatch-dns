@@ -29,8 +29,9 @@ func seedStore(t *testing.T) *store.Store {
 		a []any
 	}{
 		{`INSERT INTO devices (ip, mac, hostname, last_seen) VALUES (?,?,?,?)`, []any{"192.168.1.8", "aa:bb:cc:01", "phone", now}},
-		{`INSERT INTO dns_log (client_ip, domain, qtype, ts) VALUES (?,?,?,?)`, []any{"192.168.1.8", "example.com.", "A", now - 100}},
-		{`INSERT INTO dns_log (client_ip, domain, qtype, ts) VALUES (?,?,?,?)`, []any{"192.168.1.8", "maps.example.net", "A", now - 50}},
+		{`INSERT INTO dns_log (client_ip, domain, qtype, ts, noise) VALUES (?,?,?,?,?)`, []any{"192.168.1.8", "example.com.", "A", now - 100, 0}},
+		{`INSERT INTO dns_log (client_ip, domain, qtype, ts, noise) VALUES (?,?,?,?,?)`, []any{"192.168.1.8", "maps.example.net", "A", now - 50, 0}},
+		{`INSERT INTO dns_log (client_ip, domain, qtype, ts, noise) VALUES (?,?,?,?,?)`, []any{"192.168.1.8", "ads.example.ru", "A", now - 10, 1}},
 		{`INSERT INTO sni_log (client_ip, sni, ts) VALUES (?,?,?)`, []any{"192.168.1.8", "cdn.example.org", now - 40}},
 	}
 	sdb := db.DB()
@@ -82,6 +83,40 @@ func contains(haystack, needle string) bool {
 	return strings.Contains(haystack, needle)
 }
 
+// TestFeedNoiseView guards the noise-visibility UI contract:
+// default view hides noise (and counts it), /?show=all reveals everything,
+// /top excludes noise always.
+func TestFeedNoiseView(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		path       string
+		noiseShown bool
+		counter    bool
+	}{
+		{"default hides noise", "/", false, true},
+		{"show=all reveals noise", "/?show=all", true, false},
+		{"top excludes noise", "/top?period=1h", false, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := New(seedStore(t), nil)
+			rec := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, tt.path, nil))
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d", rec.Code)
+			}
+			body := rec.Body.String()
+			if contains(body, "ads.example.ru") != tt.noiseShown {
+				t.Fatalf("noise visibility = %v, want %v", contains(body, "ads.example.ru"), tt.noiseShown)
+			}
+			if contains(body, "шумных скрыто") != tt.counter {
+				t.Fatalf("hidden-counter presence = %v, want %v", contains(body, "шумных скрыто"), tt.counter)
+			}
+		})
+	}
+}
+
 func TestAPIEventsJSON(t *testing.T) {
 	t.Parallel()
 	srv := New(seedStore(t), nil)
@@ -94,8 +129,8 @@ func TestAPIEventsJSON(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &ev); err != nil {
 		t.Fatalf("bad json: %v", err)
 	}
-	if len(ev) != 3 {
-		t.Fatalf("got %d events, want 3: %+v", len(ev), ev)
+	if len(ev) != 4 {
+		t.Fatalf("got %d events, want 4 (incl. noise row): %+v", len(ev), ev)
 	}
 	// Newest first.
 	for i := 1; i < len(ev); i++ {

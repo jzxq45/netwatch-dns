@@ -19,6 +19,7 @@ type Event struct {
 	ClientIP string
 	Name     string
 	TS       int64
+	Noise    bool
 }
 
 // DeviceRow is one devices entry.
@@ -37,17 +38,26 @@ type TopRow struct {
 	Count    int
 }
 
-const unifiedEventSQL = `
-SELECT kind, client_ip, name, ts FROM (
-    SELECT ? AS kind, client_ip, domain AS name, ts FROM dns_log
+// newEventSQL builds the unified dns/sni reader. includeNoise controls the
+// dns-side noise filter (sni rows carry no noise flag — always included).
+func newEventSQL(includeNoise bool) string {
+	dnsWhere := ""
+	if !includeNoise {
+		dnsWhere = " WHERE COALESCE(noise, 0) = 0"
+	}
+	return `
+SELECT kind, client_ip, name, ts, noise FROM (
+    SELECT ? AS kind, client_ip, domain AS name, ts, COALESCE(noise,0) AS noise
+      FROM dns_log` + dnsWhere + `
     UNION ALL
-    SELECT ?, client_ip, sni AS name, ts FROM sni_log
+    SELECT ?, client_ip, sni AS name, ts, 0 AS noise FROM sni_log
 )
 `
+}
 
-// RecentEvents returns the newest events of both logs, newest first.
+// RecentEvents returns the newest clear (non-noise) events, newest first.
 func (s *Store) RecentEvents(ctx context.Context, limit int) ([]Event, error) {
-	q := fmt.Sprintf("%s ORDER BY ts DESC LIMIT %d", unifiedEventSQL, limit) //nolint:gosec // limit is caller-bounded
+	q := fmt.Sprintf("%s ORDER BY ts DESC LIMIT %d", newEventSQL(false), limit) //nolint:gosec // limit is caller-bounded
 	rows, err := s.db.QueryContext(ctx, q, EventDNS, EventSNI)
 	if err != nil {
 		return nil, fmt.Errorf("recent events: %w", err)
@@ -55,9 +65,32 @@ func (s *Store) RecentEvents(ctx context.Context, limit int) ([]Event, error) {
 	return scanEvents(rows)
 }
 
-// EventsSince returns events with ts > since (unix seconds), newest first.
+// RecentEventsAll is RecentEvents without the noise filter (show=all view).
+func (s *Store) RecentEventsAll(ctx context.Context, limit int) ([]Event, error) {
+	q := fmt.Sprintf("%s ORDER BY ts DESC LIMIT %d", newEventSQL(true), limit) //nolint:gosec // limit is caller-bounded
+	rows, err := s.db.QueryContext(ctx, q, EventDNS, EventSNI)
+	if err != nil {
+		return nil, fmt.Errorf("recent events all: %w", err)
+	}
+	return scanEvents(rows)
+}
+
+// NoisyEventsSince counts noise-flagged dns rows at or after sinceTS —
+// the "hidden noise" counter under the clean feed.
+func (s *Store) NoisyEventsSince(ctx context.Context, sinceTS int64) (int, error) {
+	var n int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT count(*) FROM dns_log WHERE COALESCE(noise,0)=1 AND ts >= ?`, sinceTS).
+		Scan(&n); err != nil {
+		return 0, fmt.Errorf("noise count: %w", err)
+	}
+	return n, nil
+}
+
+// EventsSince returns events with ts > since (unix seconds), newest first
+// (any noise flag — this feeds the JSON API for scripts).
 func (s *Store) EventsSince(ctx context.Context, since int64, limit int) ([]Event, error) {
-	q := fmt.Sprintf("%s WHERE ts > ? ORDER BY ts DESC LIMIT %d", unifiedEventSQL, limit) //nolint:gosec // limit is caller-bounded
+	q := fmt.Sprintf("%s WHERE ts > ? ORDER BY ts DESC LIMIT %d", newEventSQL(true), limit) //nolint:gosec // limit is caller-bounded
 	rows, err := s.db.QueryContext(ctx, q, EventDNS, EventSNI, since)
 	if err != nil {
 		return nil, fmt.Errorf("events since %d: %w", since, err)
@@ -70,9 +103,11 @@ func scanEvents(rows *sql.Rows) ([]Event, error) {
 	var out []Event
 	for rows.Next() {
 		var e Event
-		if err := rows.Scan(&e.Kind, &e.ClientIP, &e.Name, &e.TS); err != nil {
+		var noise int
+		if err := rows.Scan(&e.Kind, &e.ClientIP, &e.Name, &e.TS, &noise); err != nil {
 			return nil, fmt.Errorf("scan event: %w", err)
 		}
+		e.Noise = noise == 1
 		out = append(out, e)
 	}
 	return out, rows.Err()
@@ -93,9 +128,9 @@ func (s *Store) DeviceByIP(ctx context.Context, ip string) (*DeviceRow, error) {
 	return &d, nil
 }
 
-// DeviceEvents returns one device's log rows, newest first.
+// DeviceEvents returns one device's log rows (any noise flag), newest first.
 func (s *Store) DeviceEvents(ctx context.Context, ip string, limit int) ([]Event, error) {
-	q := fmt.Sprintf("%s WHERE client_ip = ? ORDER BY ts DESC LIMIT %d", unifiedEventSQL, limit) //nolint:gosec // limit is caller-bounded
+	q := fmt.Sprintf("%s WHERE client_ip = ? ORDER BY ts DESC LIMIT %d", newEventSQL(true), limit) //nolint:gosec // limit is caller-bounded
 	rows, err := s.db.QueryContext(ctx, q, EventDNS, EventSNI, ip)
 	if err != nil {
 		return nil, fmt.Errorf("device events %s: %w", ip, err)
@@ -123,13 +158,13 @@ func (s *Store) ListDevices(ctx context.Context) ([]DeviceRow, error) {
 	return out, rows.Err()
 }
 
-// TopDomains aggregates DNS domain counts per device since sinceTS.
+// TopDomains aggregates non-noise DNS domain counts per device since sinceTS.
 func (s *Store) TopDomains(ctx context.Context, sinceTS int64, limit int) ([]TopRow, error) {
 	q := `
 SELECT d.ip, COALESCE(d.hostname,''), t.domain, t.cnt
 FROM (
     SELECT client_ip, domain, count(*) AS cnt
-    FROM dns_log WHERE ts > ?
+    FROM dns_log WHERE ts > ? AND COALESCE(noise,0)=0
     GROUP BY client_ip, domain
 ) t JOIN devices d ON d.ip = t.client_ip
 ORDER BY d.ip, cnt DESC LIMIT ?`

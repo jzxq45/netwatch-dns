@@ -35,7 +35,18 @@ var defaultDoHBlocklist = []string{
 	"dns.adguard.com",
 }
 
-const insertQuery = "INSERT INTO dns_log (client_ip, domain, qtype, ts) VALUES (?,?,?,?)"
+// defaultNoiseDomains — SDK/телеметрия и прочий фоновый трафик.
+// Пишем в dns_log с noise=1 (intel), но не в stdout и не в дефолтную ленту.
+// YAML `noise_domains` replaces this list entirely when set.
+var defaultNoiseDomains = []string{
+	"*.gstatic.com", // connectivitycheck и прочие поддмены
+	"*.in-addr.arpa",
+	"mtalk.google.com",
+	"optimizationguide-pa.googleapis.com",
+	"readaloud.googleapis.com",
+}
+
+const insertQuery = "INSERT INTO dns_log (client_ip, domain, qtype, ts, noise) VALUES (?,?,?,?,?)"
 
 type Record struct {
 	ClientIP string
@@ -57,6 +68,9 @@ type Server struct {
 	// Blocklist replaces defaultDoHBlocklist when set before Start.
 	Blocklist []string
 
+	// NoiseDomains replaces defaultNoiseDomains when set before Start.
+	NoiseDomains []string
+
 	// Log-filter knobs (set before Start):
 	SkipPTR        bool     // answer empty NOERROR for PTR in-addr.arpa; no log/upstream
 	SearchSuffixes []string // LAN search suffixes stripped from logged names only
@@ -64,6 +78,7 @@ type Server struct {
 	DoHWindow      string   // aggregation window, e.g. "10s"
 
 	blocklist []string // normalized effective list (set by New/Start)
+	noiselist []string // normalized effective noise patterns (set by New/Start)
 	dohLevel  slog.Level
 	window    time.Duration
 	suffixes  []string // normalized lowercase search suffixes
@@ -79,6 +94,7 @@ func New(upstream string, db *sql.DB, log *slog.Logger) *Server {
 		log:       log,
 		snk:       store.NewSink(db, log, insertQuery),
 		blocklist: normalizeEntries(defaultDoHBlocklist),
+		noiselist: normalizeEntries(defaultNoiseDomains),
 	}
 }
 
@@ -97,13 +113,33 @@ func normalizeEntries(list []string) []string {
 }
 
 // effective overrides/defaults are normalized once at Start (handlers are concurrent).
-func (s *Server) effectiveBlocklist() []string { return s.blocklist }
 
 // isBlocked: exact or subdomain (suffix) match against the list.
 func (s *Server) isBlocked(name string) bool {
 	name = strings.ToLower(strings.TrimSuffix(name, "."))
-	for _, e := range s.effectiveBlocklist() {
+	for _, e := range s.blocklist {
 		if name == e || strings.HasSuffix(name, "."+e) {
+			return true
+		}
+	}
+	return false
+}
+
+// isNoise: pattern match against the noise list. Patterns:
+//   - "*.suffix.tld" — wildcard label: sub.suffix.tld and suffix.tld match,
+//     nonsuffix.tld does not (boundary must be a full dot);
+//   - plain "host.tld" — exact-or-subdomain like the blocklist.
+func (s *Server) isNoise(name string) bool {
+	name = strings.ToLower(strings.TrimSuffix(name, "."))
+	for _, p := range s.noiselist {
+		if strings.HasPrefix(p, "*.") {
+			base := p[2:]
+			if name == base || strings.HasSuffix(name, "."+base) {
+				return true
+			}
+			continue
+		}
+		if name == p || strings.HasSuffix(name, "."+p) {
 			return true
 		}
 	}
@@ -123,6 +159,9 @@ func (s *Server) Start(ctx context.Context, addr string) error {
 	if s.Blocklist != nil {
 		// YAML replaces the built-in list entirely; normalize once (no concurrency).
 		s.blocklist = normalizeEntries(s.Blocklist)
+	}
+	if s.NoiseDomains != nil {
+		s.noiselist = normalizeEntries(s.NoiseDomains)
 	}
 	s.dohLevel = dohLevel(s.DoHLogLevel)
 	s.window = parseWindow(s.DoHWindow, 10*time.Second, s.log)
@@ -206,15 +245,26 @@ func (s *Server) handle(w dns.ResponseWriter, r *dns.Msg) {
 		return
 	}
 
-	s.log.Info("dns query", "client", clientIP, "domain", domain, "qtype", dns.TypeToString[q.Qtype], "ts", ts)
+	blocked := s.isBlocked(q.Name)
+	noisy := s.isNoise(domain)
+	if noisy {
+		// noise=1 rows land in the DB (intel) but never in stdout Info.
+		s.log.Debug("dns noise", "client", clientIP, "domain", domain, "qtype", dns.TypeToString[q.Qtype])
+	} else {
+		s.log.Info("dns query", "client", clientIP, "domain", domain, "qtype", dns.TypeToString[q.Qtype], "ts", ts)
+	}
 	if s.OnRecord != nil {
 		s.OnRecord(rec)
 	}
-	if !s.snk.TrySend(clientIP, domain, dns.TypeToString[q.Qtype], ts) {
+	noiseFlag := 0
+	if noisy || blocked {
+		noiseFlag = 1 // blocked DoH attempts are noise in the feed, too
+	}
+	if !s.snk.TrySend(clientIP, domain, dns.TypeToString[q.Qtype], ts, noiseFlag) {
 		// Overflow is dropped instead of stalling the serve loop.
 		s.log.Warn("dns queue full, record dropped", "client", clientIP, "domain", domain)
 	}
-	if s.isBlocked(q.Name) {
+	if blocked {
 		// DoH endpoints are answered NXDOMAIN here; the request itself is
 		// aggregated: one dns_blocked_doh line per (client, domain) per window.
 		s.aggr.add(clientIP, domain)

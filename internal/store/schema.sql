@@ -11,7 +11,8 @@ CREATE TABLE IF NOT EXISTS dns_log (
     client_ip TEXT,
     domain    TEXT,
     qtype     TEXT,
-    ts        INTEGER
+    ts        INTEGER,
+    noise     INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_dns_ts     ON dns_log(ts);
 CREATE INDEX IF NOT EXISTS idx_dns_client ON dns_log(client_ip);
