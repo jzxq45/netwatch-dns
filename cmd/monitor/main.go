@@ -15,6 +15,7 @@ import (
 	"monitor/internal/config"
 	"monitor/internal/devices"
 	dnssrv "monitor/internal/dns"
+	"monitor/internal/retention"
 	"monitor/internal/sni"
 	"monitor/internal/store"
 	"monitor/internal/web"
@@ -78,6 +79,8 @@ func run() error {
 
 	// Web UI: read-only on SQLite.
 	g.Go(func() error { return web.New(db, slog.Default()).Start(ctx, cfg.WebListen) })
+
+	retention.Start(ctx, db, cfg.RetentionDays)
 
 	slog.Info("started",
 		"dns", cfg.DNSListen,

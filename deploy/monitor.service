@@ -1,0 +1,21 @@
+[Unit]
+Description=Passive LAN traffic monitor (DNS/SNI/devices)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/monitor -config /etc/monitor/monitor.yaml
+StateDirectory=monitor
+WorkingDirectory=/var/lib/monitor
+Restart=on-failure
+RestartSec=5s
+# packet capture / raw sockets need privileges; drop the rest
+AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/monitor
+
+[Install]
+WantedBy=multi-user.target
