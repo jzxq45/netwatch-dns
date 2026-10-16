@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 )
 
@@ -75,6 +76,31 @@ func scanEvents(rows *sql.Rows) ([]Event, error) {
 		out = append(out, e)
 	}
 	return out, rows.Err()
+}
+
+// DeviceByIP returns one device row or nil when unknown.
+func (s *Store) DeviceByIP(ctx context.Context, ip string) (*DeviceRow, error) {
+	var d DeviceRow
+	err := s.db.QueryRowContext(ctx,
+		`SELECT ip, COALESCE(mac,''), COALESCE(hostname,''), last_seen FROM devices WHERE ip = ?`, ip).
+		Scan(&d.IP, &d.MAC, &d.Hostname, &d.LastSeen)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("device %s: %w", ip, err)
+	}
+	return &d, nil
+}
+
+// DeviceEvents returns one device's log rows, newest first.
+func (s *Store) DeviceEvents(ctx context.Context, ip string, limit int) ([]Event, error) {
+	q := fmt.Sprintf("%s WHERE client_ip = ? ORDER BY ts DESC LIMIT %d", unifiedEventSQL, limit) //nolint:gosec // limit is caller-bounded
+	rows, err := s.db.QueryContext(ctx, q, EventDNS, EventSNI, ip)
+	if err != nil {
+		return nil, fmt.Errorf("device events %s: %w", ip, err)
+	}
+	return scanEvents(rows)
 }
 
 // ListDevices returns the device table ordered by last_seen desc.

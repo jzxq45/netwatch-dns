@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"html/template"
 	"log/slog"
+	"net"
 	"net/http"
 	"strconv"
 	"time"
@@ -20,6 +21,8 @@ import (
 type Store interface {
 	RecentEvents(ctx context.Context, limit int) ([]store.Event, error)
 	EventsSince(ctx context.Context, since int64, limit int) ([]store.Event, error)
+	DeviceByIP(ctx context.Context, ip string) (*store.DeviceRow, error)
+	DeviceEvents(ctx context.Context, ip string, limit int) ([]store.Event, error)
 	ListDevices(ctx context.Context) ([]store.DeviceRow, error)
 	TopDomains(ctx context.Context, sinceTS int64, limit int) ([]store.TopRow, error)
 }
@@ -37,6 +40,7 @@ func New(st Store, log *slog.Logger) *Server {
 	s := &Server{st: st, log: log, mux: mux}
 	mux.HandleFunc("GET /{$}", s.feed)
 	mux.HandleFunc("GET /devices", s.devices)
+	mux.HandleFunc("GET /device", s.deviceLog)
 	mux.HandleFunc("GET /top", s.top)
 	mux.HandleFunc("GET /api/events", s.apiEvents)
 	mux.HandleFunc("GET /healthz", s.healthz)
@@ -93,13 +97,21 @@ const pageTail = `</body></html>`
 const contentFeed = `
 <h2>live feed (last {{len .Events}})</h2>
 <table><tr><th>time</th><th>kind</th><th>device</th><th>domain</th></tr>
-{{range .Events}}<tr><td>{{tsfmt .TS}}</td><td>{{.Kind}}</td><td>{{.ClientIP}}</td><td>{{.Name}}</td></tr>{{end}}
+{{range .Events}}<tr><td>{{tsfmt .TS}}</td><td>{{.Kind}}</td><td><a href="/device?ip={{.ClientIP}}">{{.ClientIP}}</a></td><td>{{.Name}}</td></tr>{{end}}
 </table>`
 
 const contentDevices = `
 <h2>devices</h2>
 <table><tr><th>ip</th><th>mac</th><th>hostname</th><th>last seen</th></tr>
-{{range .Devices}}<tr><td>{{.IP}}</td><td>{{.MAC}}</td><td>{{.Hostname}}</td><td>{{tsfmt .LastSeen}}</td></tr>{{end}}
+{{range .Devices}}<tr><td><a href="/device?ip={{.IP}}">{{.IP}}</a></td><td>{{.MAC}}</td><td>{{.Hostname}}</td><td>{{tsfmt .LastSeen}}</td></tr>{{end}}
+</table>`
+
+const contentDevice = `
+<h2>device {{.Dev.IP}}</h2>
+<p>mac: {{.Dev.MAC}} · hostname: {{.Dev.Hostname}} · last seen: {{tsfmt .Dev.LastSeen}}</p>
+<h3>history (last {{len .Events}})</h3>
+<table><tr><th>time</th><th>kind</th><th>query</th></tr>
+{{range .Events}}<tr><td>{{tsfmt .TS}}</td><td>{{.Kind}}</td><td>{{.Name}}</td></tr>{{end}}
 </table>`
 
 const contentTop = `
@@ -140,6 +152,32 @@ func (s *Server) devices(w http.ResponseWriter, r *http.Request) {
 	render(w, http.StatusOK, page(contentDevices), struct {
 		Devices []store.DeviceRow
 	}{ds})
+}
+
+func (s *Server) deviceLog(w http.ResponseWriter, r *http.Request) {
+	ip := r.URL.Query().Get("ip")
+	if ip == "" || net.ParseIP(ip) == nil {
+		http.Error(w, "invalid ip", http.StatusBadRequest)
+		return
+	}
+	dev, err := s.st.DeviceByIP(r.Context(), ip)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if dev == nil {
+		// Unknown device (row appears after first query) — still show history.
+		dev = &store.DeviceRow{IP: ip}
+	}
+	events, err := s.st.DeviceEvents(r.Context(), ip, feedLimit)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	render(w, http.StatusOK, page(contentDevice), struct {
+		Dev    *store.DeviceRow
+		Events []store.Event
+	}{dev, events})
 }
 
 func (s *Server) top(w http.ResponseWriter, r *http.Request) {
