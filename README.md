@@ -62,8 +62,7 @@
  └───────────────────────────────────────────────────────────────────────┘
 ```
 
-*(no screenshot yet — replace this ASCII mock with a real one when the UI is
-stable; see `scripts/make-screenshot` note below)*
+*(screenshots are skipped for privacy — this ASCII mock with dummy data stands in; see / on the live monitor for the real thing)*
 
 ```
  ┌─────────────────────────────────────────────────────────────┐

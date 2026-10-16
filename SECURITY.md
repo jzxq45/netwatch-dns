@@ -3,10 +3,9 @@
 ## Reporting a vulnerability
 
 netwatch-dns is a self-hosted, single-admin tool. If you found a
-vulnerability, please report it privately:
-
-- Email: `security@yourdomain.invalid` *(replace with real address before publishing)*
-- Или через GitHub: open a private security advisory (Security → Advisories).
+vulnerability, report it privately via GitHub:
+**Security → Advisories → New draft security advisory**
+(https://github.com/YOURNAME/netwatch-dns/security/advisories/new / «Report a vulnerability»).
 
 Please include: affected version (commit hash), setup details (what listens
 on what), reproduction steps. Do not open public issues for exploitable bugs.
