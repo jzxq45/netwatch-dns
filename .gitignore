@@ -1,5 +1,17 @@
+# --- Go build artifacts ---
+*.exe
+*.exe~
+monitor
+dist/
 
-# android
+# --- Databases (runtime state, never commit) ---
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+*.log
+
+# --- Android ---
 android/.gradle/
 android/build/
 android/app/build/
@@ -7,3 +19,10 @@ local.properties
 *.apk
 *.keystore
 *.jks
+
+# --- IDE / OS ---
+.idea/
+.vscode/
+*.swp
+Thumbs.db
+Desktop.ini
