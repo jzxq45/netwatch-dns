@@ -40,6 +40,10 @@ type Server struct {
 
 	records chan Record
 	wg      sync.WaitGroup
+
+	// OnRecord, when set, is called for every accepted query (devices feed).
+	// Must be set before Start; invoked synchronously on the serve path.
+	OnRecord func(Record)
 }
 
 func New(upstream string, db *sql.DB, log *slog.Logger) *Server {
@@ -110,7 +114,11 @@ func (s *Server) handle(w dns.ResponseWriter, r *dns.Msg) {
 		return
 	}
 	q := r.Question[0]
+	rec := Record{ClientIP: clientIP, Domain: q.Name, QType: dns.TypeToString[q.Qtype], TS: ts}
 	s.log.Info("dns query", "client", clientIP, "domain", q.Name, "qtype", dns.TypeToString[q.Qtype], "ts", ts)
+	if s.OnRecord != nil {
+		s.OnRecord(rec)
+	}
 	select {
 	case s.records <- Record{ClientIP: clientIP, Domain: q.Name, QType: dns.TypeToString[q.Qtype], TS: ts}:
 	default:

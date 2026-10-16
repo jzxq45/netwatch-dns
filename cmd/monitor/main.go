@@ -12,6 +12,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"monitor/internal/config"
+	"monitor/internal/devices"
 	dnssrv "monitor/internal/dns"
 	"monitor/internal/store"
 )
@@ -52,7 +53,12 @@ func run() error {
 
 	// dns owns DB writes and stops before the deferred db.Close runs.
 	dnsSrv := dnssrv.New(cfg.UpstreamDNS, db.DB(), slog.Default())
+	devRes := devices.New(db, slog.Default())
+	dnsSrv.OnRecord = func(rec dnssrv.Record) {
+		devRes.Feed(devices.Record{ClientIP: rec.ClientIP, TS: rec.TS})
+	}
 	g.Go(func() error { return dnsSrv.Start(ctx, cfg.DNSListen) })
+	g.Go(func() error { return devRes.Start(ctx) })
 
 	slog.Info("started",
 		"db", cfg.DBPath,

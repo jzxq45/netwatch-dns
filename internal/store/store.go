@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	_ "embed"
 	"fmt"
@@ -39,6 +40,21 @@ func (s *Store) DB() *sql.DB { return s.db }
 func (s *Store) Close() error {
 	if err := s.db.Close(); err != nil {
 		return fmt.Errorf("close db: %w", err)
+	}
+	return nil
+}
+
+// UpsertDevice stores/refreshes a device row. nil mac/hostname keep the old value;
+// lastSeen always refreshes (DNS feed passes nils, ARP path passes real values).
+func (s *Store) UpsertDevice(ctx context.Context, ip string, mac, hostname *string, lastSeen int64) error {
+	q := `INSERT INTO devices (ip, mac, hostname, last_seen)
+	      VALUES (?, ?, ?, ?)
+	      ON CONFLICT(ip) DO UPDATE SET
+	          mac      = COALESCE(excluded.mac, devices.mac),
+	          hostname = COALESCE(excluded.hostname, devices.hostname),
+	          last_seen = excluded.last_seen`
+	if _, err := s.db.ExecContext(ctx, q, ip, mac, hostname, lastSeen); err != nil {
+		return fmt.Errorf("upsert device %s: %w", ip, err)
 	}
 	return nil
 }
