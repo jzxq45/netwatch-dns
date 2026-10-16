@@ -1,5 +1,6 @@
-// Package capture provides packet-capture backends for the SNI sniffer and
-// (later) the ARP scanner. Default backend is the stub: capture needs libpcap.
+//go:build !pcap
+
+// Package capture — stub: this build has no libpcap backend compiled in.
 package capture
 
 import (

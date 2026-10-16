@@ -9,19 +9,15 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
-	"sync"
 	"time"
 
 	"github.com/miekg/dns"
 	"golang.org/x/sync/errgroup"
+
+	"monitor/internal/store"
 )
 
-const (
-	chanBuffer = 1024 // absorbs bursts; overflow is dropped, never blocks serving
-	batchSize  = 100  // matches store batch-insert target from spec
-	flushEvery = 100 * time.Millisecond
-	upstreamTO = 2 * time.Second
-)
+const upstreamTO = 2 * time.Second
 
 const insertQuery = "INSERT INTO dns_log (client_ip, domain, qtype, ts) VALUES (?,?,?,?)"
 
@@ -36,10 +32,7 @@ type Record struct {
 type Server struct {
 	upstream string
 	log      *slog.Logger
-	db       *sql.DB
-
-	records chan Record
-	wg      sync.WaitGroup
+	snk      *store.Sink
 
 	// OnRecord, when set, is called for every accepted query (devices feed).
 	// Must be set before Start; invoked synchronously on the serve path.
@@ -53,8 +46,7 @@ func New(upstream string, db *sql.DB, log *slog.Logger) *Server {
 	return &Server{
 		upstream: upstream,
 		log:      log,
-		db:       db,
-		records:  make(chan Record, chanBuffer),
+		snk:      store.NewSink(db, log, insertQuery),
 	}
 }
 
@@ -62,12 +54,9 @@ func New(upstream string, db *sql.DB, log *slog.Logger) *Server {
 // the async writer flushed accepted records, so the caller may close the DB.
 func (s *Server) Start(ctx context.Context, addr string) error {
 	sctx, cancel := context.WithCancel(ctx)
-	defer func() {
-		cancel() // stops writeLoop via sctx.Done
-		s.wg.Wait()
-	}()
-	s.wg.Add(1)
-	go s.writeLoop(sctx)
+	defer cancel()
+	sinkDone := make(chan error, 1)
+	go func() { sinkDone <- s.snk.Start(sctx) }()
 
 	udp := &dns.Server{Addr: addr, Net: "udp", Handler: dns.HandlerFunc(s.handle)}
 	tcp := &dns.Server{Addr: addr, Net: "tcp", Handler: dns.HandlerFunc(s.handle)}
@@ -76,14 +65,18 @@ func (s *Server) Start(ctx context.Context, addr string) error {
 		srv := srv
 		eg.Go(func() error { return serve(egctx, srv) })
 	}
-	if err := eg.Wait(); err != nil && !errors.Is(err, context.Canceled) {
+	err := eg.Wait()
+	cancel()   // sink exits via sctx.Done
+	<-sinkDone // drain+flush finished — safe for caller to close the DB
+	if err != nil && !errors.Is(err, context.Canceled) {
 		return fmt.Errorf("dns serve %s: %w", addr, err)
 	}
 	return nil
 }
 
-// serve runs one listener and shuts it down on ctx done.
-// ListenAndServe creates the socket from Addr; ActivateAndServe needs an explicit conn.
+// serve runs one listener (ListenAndServe creates the socket from Addr) and
+// tells it to close on ctx done. Fire-and-forget Shutdown: waiting for the
+// close-wait (~dns read-timeout) is not worth delaying Start's exit path.
 func serve(ctx context.Context, srv *dns.Server) error {
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.ListenAndServe() }()
@@ -94,9 +87,6 @@ func serve(ctx context.Context, srv *dns.Server) error {
 		}
 		return nil
 	case <-ctx.Done():
-		// Fire-and-forget Shutdown: waiting for the listeners' close-wait
-		// (ShutdownContext blocks until the last read deadlines expire, ~2s)
-		// is not worth delaying Start's exit path; residuals die on their own.
 		go func() {
 			if err := srv.Shutdown(); err != nil {
 				slog.Error("dns shutdown", "net", srv.Net, "err", err)
@@ -119,10 +109,8 @@ func (s *Server) handle(w dns.ResponseWriter, r *dns.Msg) {
 	if s.OnRecord != nil {
 		s.OnRecord(rec)
 	}
-	select {
-	case s.records <- Record{ClientIP: clientIP, Domain: q.Name, QType: dns.TypeToString[q.Qtype], TS: ts}:
-	default:
-		// Drop instead of blocking the serve loop when storage lags.
+	if !s.snk.TrySend(clientIP, q.Name, dns.TypeToString[q.Qtype], ts) {
+		// Overflow is dropped instead of stalling the serve loop.
 		s.log.Warn("dns queue full, record dropped", "client", clientIP, "domain", q.Name)
 	}
 	resp, err := s.exchange(r)
@@ -139,13 +127,13 @@ func (s *Server) handle(w dns.ResponseWriter, r *dns.Msg) {
 }
 
 // exchange creates a client per query: dns.Client is not documented as safe for concurrent use.
-func (s *Server) exchange(r *dns.Msg) (*dns.Msg, error) {
+func (s *Server) exchange(r *dns.Msg) (resp *dns.Msg, err error) {
 	q := new(dns.Msg)
 	q.SetQuestion(r.Question[0].Name, r.Question[0].Qtype)
 	q.RecursionDesired = true
 
-	resp, _, err := (&dns.Client{Timeout: upstreamTO, Net: "udp"}).Exchange(q, s.upstream)
 	// TCP fallback: truncated or lost UDP answer retried once over TCP.
+	resp, _, err = (&dns.Client{Timeout: upstreamTO, Net: "udp"}).Exchange(q, s.upstream)
 	if err != nil || (resp != nil && resp.Truncated) {
 		resp, _, err = (&dns.Client{Timeout: upstreamTO, Net: "tcp"}).Exchange(q, s.upstream)
 	}
@@ -161,7 +149,7 @@ func (s *Server) exchange(r *dns.Msg) (*dns.Msg, error) {
 func fail(w dns.ResponseWriter, r *dns.Msg) {
 	m := new(dns.Msg)
 	m.SetRcode(r, dns.RcodeServerFailure)
-	//nolint:errcheck // see handle: only a lost UDP packet
+	//nolint:errcheck // only a lost UDP packet
 	_ = w.WriteMsg(m)
 }
 
@@ -171,70 +159,4 @@ func clientIP(a net.Addr) string {
 		return a.String()
 	}
 	return host
-}
-
-// writeLoop batches inserts; exits after draining whatever was accepted at cancel time.
-func (s *Server) writeLoop(ctx context.Context) {
-	defer s.wg.Done()
-	batch := make([]Record, 0, batchSize)
-	ticker := time.NewTicker(flushEvery)
-	defer ticker.Stop()
-	flush := func() {
-		if len(batch) == 0 {
-			return
-		}
-		// WithoutCancel: shutdown flush must outlive the canceled loop context.
-		ictx := context.WithoutCancel(ctx)
-		tx, err := s.db.BeginTx(ictx, nil)
-		if err != nil {
-			s.log.Error("dns batch begin", "err", err)
-			batch = batch[:0]
-			return
-		}
-		stmt, err := tx.PrepareContext(ictx, insertQuery)
-		if err != nil {
-			s.log.Error("dns batch prepare", "err", err)
-			batch = batch[:0]
-			return
-		}
-		for _, rec := range batch {
-			if _, err := stmt.ExecContext(ictx, rec.ClientIP, rec.Domain, rec.QType, rec.TS); err != nil {
-				s.log.Error("dns insert", "err", err, "domain", rec.Domain)
-			}
-		}
-		if err := stmt.Close(); err != nil {
-			s.log.Error("dns stmt close", "err", err)
-		}
-		if err := tx.Commit(); err != nil {
-			s.log.Error("dns batch commit", "err", err)
-		}
-		batch = batch[:0]
-	}
-
-	for {
-		select {
-		case rec, ok := <-s.records:
-			if !ok {
-				flush()
-				return
-			}
-			batch = append(batch, rec)
-			if len(batch) >= batchSize {
-				flush()
-			}
-		case <-ticker.C:
-			flush()
-		case <-ctx.Done():
-			// Drain: every record accepted by handle must land in the DB.
-			for {
-				select {
-				case rec := <-s.records:
-					batch = append(batch, rec)
-				default:
-					flush()
-					return
-				}
-			}
-		}
-	}
 }
