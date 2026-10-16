@@ -6,7 +6,7 @@
 ## Build / run
 
 ```
-git clone https://github.com/YOURNAME/netwatch-dns && cd netwatch-dns
+git clone https://github.com/jzxq45/netwatch-dns && cd netwatch-dns
 go build ./...
 ```
 

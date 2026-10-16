@@ -3,12 +3,12 @@
 > Passive DNS telemetry for your home LAN. See what domains each device
 > resolves — with no client-side install on phones or laptops.
 
-[![CI](https://github.com/YOURNAME/netwatch-dns/actions/workflows/ci.yml/badge.svg)](https://github.com/YOURNAME/netwatch-dns/actions/workflows/ci.yml)
+[![CI](https://github.com/jzxq45/netwatch-dns/actions/workflows/ci.yml/badge.svg)](https://github.com/jzxq45/netwatch-dns/actions/workflows/ci.yml)
 [![Go version](https://img.shields.io/badge/go-1.23%2B-00ADD8?logo=go)](https://go.dev/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Android APK](https://img.shields.io/badge/Android-APK-3DDC84?logo=android)](android/README.md)
 
-*(placeholders: replace `YOURNAME` with the actual repo owner after the first push)*
+*(placeholders: replace `jzxq45` with the actual repo owner after the first push)*
 
 ---
 
@@ -89,7 +89,7 @@
 ### 1. Build
 
 ```
-git clone https://github.com/YOURNAME/netwatch-dns && cd netwatch-dns
+git clone https://github.com/jzxq45/netwatch-dns && cd netwatch-dns
 # Windows (PowerShell):
 $env:CGO_ENABLED='0'; go build -o monitor.exe ./cmd/monitor
 # Linux/macOS:
