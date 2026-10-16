@@ -10,12 +10,13 @@ import (
 )
 
 type Config struct {
-	Interface     string `yaml:"interface"`    // LAN iface for SNI capture / device resolver
-	UpstreamDNS   string `yaml:"upstream_dns"` // resolver PC forwards queries to
-	DNSListen     string `yaml:"dns_listen"`   // UDP+TCP listener for the DNS server
-	WebListen     string `yaml:"web_listen"`   // web UI / health endpoint
-	DBPath        string `yaml:"db_path"`      // SQLite file
-	RetentionDays int    `yaml:"retention_days"`
+	Interface     string   `yaml:"interface"`    // LAN iface for SNI capture / device resolver
+	UpstreamDNS   string   `yaml:"upstream_dns"` // resolver PC forwards queries to
+	DNSListen     string   `yaml:"dns_listen"`   // UDP+TCP listener for the DNS server
+	WebListen     string   `yaml:"web_listen"`   // web UI / health endpoint
+	DBPath        string   `yaml:"db_path"`      // SQLite file
+	RetentionDays int      `yaml:"retention_days"`
+	DoHBlocklist  []string `yaml:"doh_blocklist"` // replaces built-in list when set
 }
 
 const (

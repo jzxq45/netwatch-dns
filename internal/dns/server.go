@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"strings"
 	"time"
 
 	"github.com/miekg/dns"
@@ -18,6 +19,21 @@ import (
 )
 
 const upstreamTO = 2 * time.Second
+
+// defaultDoHBlocklist: endpoints popular DoH resolvers use; router-side
+// blocking cannot keep up with CDN-hosted ones, so we drop them at DNS level.
+// YAML `doh_blocklist` replaces this list entirely when set.
+var defaultDoHBlocklist = []string{
+	"dns.google",
+	"dns.google.com",
+	"chrome.cloudflare-dns.com",
+	"cloudflare-dns.com",
+	"mozilla.cloudflare-dns.com",
+	"doh.opendns.com",
+	"dns.quad9.net",
+	"doh.adguard.com",
+	"dns.adguard.com",
+}
 
 const insertQuery = "INSERT INTO dns_log (client_ip, domain, qtype, ts) VALUES (?,?,?,?)"
 
@@ -37,6 +53,11 @@ type Server struct {
 	// OnRecord, when set, is called for every accepted query (devices feed).
 	// Must be set before Start; invoked synchronously on the serve path.
 	OnRecord func(Record)
+
+	// Blocklist replaces defaultDoHBlocklist when set before Start.
+	Blocklist []string
+
+	blocklist []string // normalized effective list (Set by New/Start)
 }
 
 func New(upstream string, db *sql.DB, log *slog.Logger) *Server {
@@ -44,10 +65,39 @@ func New(upstream string, db *sql.DB, log *slog.Logger) *Server {
 		log = slog.Default()
 	}
 	return &Server{
-		upstream: upstream,
-		log:      log,
-		snk:      store.NewSink(db, log, insertQuery),
+		upstream:  upstream,
+		log:       log,
+		snk:       store.NewSink(db, log, insertQuery),
+		blocklist: normalizeEntries(defaultDoHBlocklist),
 	}
+}
+
+// normalizeEntries lowercases, trims spaces and drops trailing dots so the
+// match below is case-insensitive and FQDN-form agnostic.
+func normalizeEntries(list []string) []string {
+	out := make([]string, 0, len(list))
+	for _, e := range list {
+		e = strings.ToLower(strings.TrimSpace(e))
+		e = strings.TrimSuffix(e, ".")
+		if e != "" {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// effective overrides/defaults are normalized once at Start (handlers are concurrent).
+func (s *Server) effectiveBlocklist() []string { return s.blocklist }
+
+// isBlocked: exact or subdomain (suffix) match against the list.
+func (s *Server) isBlocked(name string) bool {
+	name = strings.ToLower(strings.TrimSuffix(name, "."))
+	for _, e := range s.effectiveBlocklist() {
+		if name == e || strings.HasSuffix(name, "."+e) {
+			return true
+		}
+	}
+	return false
 }
 
 // Start serves DNS (UDP+TCP) on addr until ctx is done. Returns only after
@@ -60,6 +110,10 @@ func (s *Server) Start(ctx context.Context, addr string) error {
 
 	udp := &dns.Server{Addr: addr, Net: "udp", Handler: dns.HandlerFunc(s.handle)}
 	tcp := &dns.Server{Addr: addr, Net: "tcp", Handler: dns.HandlerFunc(s.handle)}
+	if s.Blocklist != nil {
+		// YAML replaces the built-in list entirely; normalize once (no concurrency).
+		s.blocklist = normalizeEntries(s.Blocklist)
+	}
 	eg, egctx := errgroup.WithContext(sctx)
 	for _, srv := range []*dns.Server{udp, tcp} {
 		srv := srv
@@ -113,6 +167,12 @@ func (s *Server) handle(w dns.ResponseWriter, r *dns.Msg) {
 		// Overflow is dropped instead of stalling the serve loop.
 		s.log.Warn("dns queue full, record dropped", "client", clientIP, "domain", q.Name)
 	}
+	if s.isBlocked(q.Name) {
+		// DoH endpoints: answered NXDOMAIN here; router rules can't keep up.
+		s.log.Info("dns_blocked_doh", "client", clientIP, "domain", q.Name)
+		nxdomain(w, r)
+		return
+	}
 	resp, err := s.exchange(r)
 	if err != nil {
 		s.log.Error("upstream", "err", err, "upstream", s.upstream)
@@ -149,6 +209,14 @@ func (s *Server) exchange(r *dns.Msg) (resp *dns.Msg, err error) {
 func fail(w dns.ResponseWriter, r *dns.Msg) {
 	m := new(dns.Msg)
 	m.SetRcode(r, dns.RcodeServerFailure)
+	//nolint:errcheck // only a lost UDP packet
+	_ = w.WriteMsg(m)
+}
+
+// nxdomain answers non-existence without touching upstream.
+func nxdomain(w dns.ResponseWriter, r *dns.Msg) {
+	m := new(dns.Msg)
+	m.SetRcode(r, dns.RcodeNameError)
 	//nolint:errcheck // only a lost UDP packet
 	_ = w.WriteMsg(m)
 }
