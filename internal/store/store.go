@@ -59,12 +59,12 @@ func (s *Store) UpsertDevice(ctx context.Context, ip string, mac, hostname *stri
 	return nil
 }
 
-// retentionTables whitelists targets for DeleteOld to keep caller input out of SQL.
-var retentionTables = map[string]bool{"dns_log": true, "sni_log": true, "flow_log": true}
+// RetentionTables whitelists targets for DeleteOld to keep caller input out of SQL.
+var RetentionTables = map[string]bool{"dns_log": true, "sni_log": true, "flow_log": true}
 
 // DeleteOld removes rows older than cutoff (unix seconds). Returns rows deleted.
 func (s *Store) DeleteOld(table string, cutoff int64) (int64, error) {
-	if !retentionTables[table] {
+	if !RetentionTables[table] {
 		return 0, fmt.Errorf("unknown table %q", table)
 	}
 	q := fmt.Sprintf("DELETE FROM %s WHERE ts < ?", table) //nolint:gosec // table is whitelisted

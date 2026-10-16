@@ -11,9 +11,11 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
+	"monitor/internal/capture"
 	"monitor/internal/config"
 	"monitor/internal/devices"
 	dnssrv "monitor/internal/dns"
+	"monitor/internal/sni"
 	"monitor/internal/store"
 )
 
@@ -59,6 +61,18 @@ func run() error {
 	}
 	g.Go(func() error { return dnsSrv.Start(ctx, cfg.DNSListen) })
 	g.Go(func() error { return devRes.Start(ctx) })
+
+	// Capture is best-effort: its absence only disables SNI (+ARP) data.
+	sniff := sni.New(db.DB(), slog.Default())
+	sniff.OnRecord = func(clientIP, host string, ts int64) {
+		devRes.Feed(devices.Record{ClientIP: clientIP, TS: ts})
+	}
+	src := capture.New(cfg.Interface, slog.Default())
+	if _, err := src.Start(ctx); err != nil {
+		slog.Warn("capture unavailable, SNI sniffer disabled", "reason", err.Error())
+	} else {
+		g.Go(func() error { return sniff.Start(ctx, src) })
+	}
 
 	slog.Info("started",
 		"db", cfg.DBPath,
