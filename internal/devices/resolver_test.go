@@ -35,6 +35,13 @@ func (s *spyStore) lastSeen(ip string) (int64, bool) {
 	return v, ok
 }
 
+func (s *spyStore) has(ip string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, ok := s.calls[ip]
+	return ok
+}
+
 func TestUpsert(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
