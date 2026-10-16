@@ -4,10 +4,12 @@ package web
 
 import (
 	"context"
+	"embed"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"html/template"
+	"io/fs"
 	"log/slog"
 	"net"
 	"net/http"
@@ -42,6 +44,7 @@ func New(st Store, log *slog.Logger) *Server {
 	mux.HandleFunc("GET /devices", s.devices)
 	mux.HandleFunc("GET /device", s.deviceLog)
 	mux.HandleFunc("GET /top", s.top)
+	mux.HandleFunc("GET /static/", s.static)
 	mux.HandleFunc("GET /api/events", s.apiEvents)
 	mux.HandleFunc("GET /healthz", s.healthz)
 	return s
@@ -80,54 +83,130 @@ func (s *Server) healthz(w http.ResponseWriter, _ *http.Request) {
 	_, _ = w.Write([]byte("ok"))
 }
 
+//go:embed static
+var staticFS embed.FS
+
 var funcMap = template.FuncMap{
 	"tsfmt": func(ts int64) string { return time.Unix(ts, 0).Format("15:04:05") },
+	// pct returns a safe bar width percentage for count/max.
+	"pct": func(count, max int) int {
+		if max <= 0 {
+			return 0
+		}
+		return count * 100 / max
+	},
+}
+
+// nav marks the current link in the top bar with class "on".
+func nav(path, current string) string {
+	if path == current {
+		return "on"
+	}
+	return ""
 }
 
 const pageHead = `<!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>monitor</title>
+<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>monitor</title><link rel="stylesheet" href="/static/style.css">
 <meta http-equiv="refresh" content="5">
-<style>body{font-family:sans-serif;margin:1rem}table{border-collapse:collapse}td,th{border:1px solid #ccc;padding:2px 8px;text-align:left}nav a{margin-right:1rem}.mute{color:#888;font-size:.85em}</style>
-</head><body>
-<nav><a href="/">live</a><a href="/devices">devices</a><a href="/top">top</a></nav><hr>
-`
+<script src="/static/app.js" defer></script></head><body>
+<header class="topbar">
+  <span class="brand"><span class="dot"></span>monitor</span>
+  <nav>
+    <a href="/" class="{{nav "/" .Path}}">Лента</a>
+    <a href="/devices" class="{{nav "/devices" .Path}}">Устройства</a>
+    <a href="/top" class="{{nav "/top" .Path}}">Топ</a>
+  </nav>
+</header>
+<main>`
 
-const pageTail = `</body></html>`
+const pageTail = `</main></body></html>`
 
 const contentFeed = `
-<h2>live feed (last {{len .Events}})</h2>
-<table><tr><th>time</th><th>kind</th><th>device</th><th>domain</th></tr>
-{{range .Events}}<tr><td>{{tsfmt .TS}}</td><td>{{.Kind}}</td><td><a href="/device?ip={{.ClientIP}}">{{.ClientIP}}</a></td><td>{{.Name}}</td></tr>{{end}}
-</table>`
+<h2>Лента <span class="sub">последние {{len .Data.Events}}</span></h2>
+{{if .Data.Events}}
+<table>
+  <thead><tr><th>Время</th><th></th><th>Устройство</th><th>Домен</th></tr></thead>
+  <tbody>{{range .Data.Events}}<tr>
+    <td class="time" data-ts="{{.TS}}">{{tsfmt .TS}}</td>
+    <td><span class="badge {{.Kind}}">{{.Kind}}</span></td>
+    <td><a class="chip link" href="/device?ip={{.ClientIP}}">{{.ClientIP}}</a></td>
+    <td class="dom">{{.Name}}</td></tr>{{end}}</tbody>
+</table>
+{{else}}<div class="empty">Пока тихо — запросы появятся здесь, когда устройства начнут резолвить домены.</div>{{end}}`
 
 const contentDevices = `
-<h2>devices</h2>
-<table><tr><th>ip</th><th>mac</th><th>hostname</th><th>last seen</th></tr>
-{{range .Devices}}<tr><td><a href="/device?ip={{.IP}}">{{.IP}}</a></td><td>{{.MAC}}</td><td>{{.Hostname}}</td><td>{{tsfmt .LastSeen}}</td></tr>{{end}}
-</table>`
+<h2>Устройства <span class="sub">{{len .Data.Devices}} шт</span></h2>
+{{if .Data.Devices}}
+<div class="cards">{{range .Data.Devices}}
+  <div class="dev-card">
+    <a class="ip" href="/device?ip={{.IP}}">{{.IP}}</a>
+    <div class="attrs">
+      {{if .Hostname}}<span class="chip">{{.Hostname}}</span>{{end}}
+      {{if .MAC}}<span class="chip">{{.MAC}}</span>{{end}}
+    </div>
+    <span class="seen">активность: <span data-ts="{{.LastSeen}}">{{tsfmt .LastSeen}}</span></span>
+  </div>{{end}}
+</div>
+{{else}}<div class="empty">Устройств ещё нет. Они появятся, как только роутер начнёт слать DNS на этот ПК (см. TODO.txt).</div>{{end}}`
 
 const contentDevice = `
-<h2>device {{.Dev.IP}}</h2>
-<p>mac: {{.Dev.MAC}} · hostname: {{.Dev.Hostname}} · last seen: {{tsfmt .Dev.LastSeen}}</p>
-<h3>history (last {{len .Events}})</h3>
-<table><tr><th>time</th><th>kind</th><th>query</th></tr>
-{{range .Events}}<tr><td>{{tsfmt .TS}}</td><td>{{.Kind}}</td><td>{{.Name}}</td></tr>{{end}}
-</table>`
+<p><a class="backlink" href="/devices">← ко всем устройствам</a></p>
+<div class="card">
+  <div class="kv">
+    <b>IP</b><span style="font-family:var(--mono)">{{.Data.Dev.IP}}</span>
+    <b>MAC</b><span>{{if .Data.Dev.MAC}}{{.Data.Dev.MAC}}{{else}}<span class="mute">—</span>{{end}}</span>
+    <b>Имя</b><span>{{if .Data.Dev.Hostname}}{{.Data.Dev.Hostname}}{{else}}<span class="mute">—</span>{{end}}</span>
+    <b>Активность</b><span class="seen"><span data-ts="{{.Data.Dev.LastSeen}}">{{tsfmt .Data.Dev.LastSeen}}</span></span>
+  </div>
+</div>
+<h2>История <span class="sub">последние {{len .Data.Events}}</span></h2>
+{{if .Data.Events}}
+<table>
+  <thead><tr><th>Время</th><th></th><th>Домен</th></tr></thead>
+  <tbody>{{range .Data.Events}}<tr>
+    <td class="time" data-ts="{{.TS}}">{{tsfmt .TS}}</td>
+    <td><span class="badge {{.Kind}}">{{.Kind}}</span></td>
+    <td class="dom">{{.Name}}</td></tr>{{end}}</tbody>
+</table>
+{{else}}<div class="empty">Для этого IP записей пока нет.</div>{{end}}`
 
 const contentTop = `
-<h2>top domains per device ({{.Period}})</h2>
-<table><tr><th>device</th><th>hostname</th><th>domain</th><th>count</th></tr>
-{{range .Rows}}<tr><td>{{.DeviceIP}}</td><td>{{.Hostname}}</td><td>{{.Domain}}</td><td>{{.Count}}</td></tr>{{end}}
-</table>`
+<h2>Топ доменов <span class="sub">за {{.Data.Period}}</span></h2>
+<p><span class="mute">период:</span>
+  <a class="chip link" href="/top?period=15m">15м</a>
+  <a class="chip link" href="/top?period=1h">1ч</a>
+  <a class="chip link" href="/top?period=6h">6ч</a>
+  <a class="chip link" href="/top?period=24h">24ч</a>
+  <a class="chip link" href="/top?period=7d">7д</a></p>
+{{if .Data.Rows}}
+<div class="card">
+{{range .Data.Rows}}
+  <div class="rowbar" style="padding:.35rem 0">
+    <a class="chip link" href="/device?ip={{.DeviceIP}}">{{.DeviceIP}}</a>
+    <div class="bar"><span style="width:{{pct .Count $.Data.Max}}%"></span></div>
+    <span style="font-family:var(--mono);text-align:right">{{.Count}}</span>
+  </div>
+  <div class="dom" style="padding:0 0 .5rem">{{.Domain}}</div>
+{{end}}
+</div>
+{{else}}<div class="empty">Нет данных за этот период.</div>{{end}}`
 
 func page(content string) *template.Template {
-	return template.Must(template.New("p").Funcs(funcMap).Parse(pageHead + content + pageTail))
+	// nav rewrites funcMap via new template instance
+	t := template.Must(template.New("p").Funcs(funcMap).Funcs(template.FuncMap{"nav": nav}).Parse(pageHead + content + pageTail))
+	return t
 }
 
-func render(w http.ResponseWriter, status int, t *template.Template, data any) {
+// render executes a parsed page. Path feeds the top-bar nav highlighting.
+func render(w http.ResponseWriter, status int, t *template.Template, path string, data any) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(status)
-	if err := t.Execute(w, data); err != nil {
+	inner := struct {
+		Path string
+		Data any
+	}{path, data}
+	if err := t.Execute(w, inner); err != nil {
 		slog.Error("web render", "err", err)
 	}
 }
@@ -138,7 +217,7 @@ func (s *Server) feed(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	render(w, http.StatusOK, page(contentFeed), struct {
+	render(w, http.StatusOK, page(contentFeed), "/", struct {
 		Events []store.Event
 	}{events})
 }
@@ -149,7 +228,7 @@ func (s *Server) devices(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	render(w, http.StatusOK, page(contentDevices), struct {
+	render(w, http.StatusOK, page(contentDevices), "/devices", struct {
 		Devices []store.DeviceRow
 	}{ds})
 }
@@ -174,7 +253,7 @@ func (s *Server) deviceLog(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	render(w, http.StatusOK, page(contentDevice), struct {
+	render(w, http.StatusOK, page(contentDevice), "/device", struct {
 		Dev    *store.DeviceRow
 		Events []store.Event
 	}{dev, events})
@@ -195,10 +274,27 @@ func (s *Server) top(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	render(w, http.StatusOK, page(contentTop), struct {
+	max := 0
+	for _, row := range rows {
+		if row.Count > max {
+			max = row.Count
+		}
+	}
+	render(w, http.StatusOK, page(contentTop), "/top", struct {
 		Rows   []store.TopRow
 		Period string
-	}{rows, period})
+		Max    int
+	}{rows, period, max})
+}
+
+// static serves the embedded css/js without a filesystem dependency.
+func (s *Server) static(w http.ResponseWriter, r *http.Request) {
+	sub, err := fs.Sub(staticFS, "static")
+	if err != nil {
+		http.Error(w, "static fs: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	http.StripPrefix("/static/", http.FileServerFS(sub)).ServeHTTP(w, r)
 }
 
 func (s *Server) apiEvents(w http.ResponseWriter, r *http.Request) {

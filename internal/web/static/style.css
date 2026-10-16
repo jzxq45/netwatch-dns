@@ -1,0 +1,77 @@
+/* monitor UI — dark theme, stdlib-only (no framework build) */
+:root{
+  --bg:#0b0f14; --panel:#111922; --panel2:#0e141c; --line:#1e2a38;
+  --text:#d7e2ee; --muted:#8296ac; --accent:#4da3ff; --accent2:#7ee2b8;
+  --mono:ui-monospace,'Cascadia Code','JetBrains Mono',Consolas,monospace;
+  --sans:'Segoe UI',system-ui,-apple-system,Roboto,sans-serif;
+  --radius:10px;
+}
+*{box-sizing:border-box}
+html{color-scheme:dark}
+body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 var(--sans)}
+a{color:var(--accent);text-decoration:none}
+a:hover{text-decoration:underline}
+
+/* ---------- top bar ---------- */
+.topbar{position:sticky;top:0;z-index:10;display:flex;align-items:center;gap:1.5rem;
+  padding:.7rem 1.2rem;background:color-mix(in srgb,var(--panel) 88%,transparent);
+  backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+.brand{display:flex;align-items:center;gap:.5rem;font-weight:650;color:var(--text)}
+.brand .dot{width:.55em;height:.55em;border-radius:50%;background:var(--accent2);
+  box-shadow:0 0 8px var(--accent2);animation:pulse 2s infinite ease-in-out}
+@keyframes pulse{50%{opacity:.4}}
+nav{display:flex;gap:.35rem}
+nav a{padding:.3rem .8rem;border-radius:999px;color:var(--muted);font-weight:500}
+nav a:hover{color:var(--text);background:var(--panel);text-decoration:none}
+nav a.on{color:#fff;background:var(--accent)}
+main{max-width:1100px;margin:0 auto;padding:1.2rem}
+
+/* ---------- headings / cards ---------- */
+h2{font-size:1.05rem;font-weight:650;margin:1.4rem 0 .6rem;color:var(--text)}
+h2 .sub{color:var(--muted);font-weight:400;font-size:.85rem}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:1rem 1.2rem}
+.cards{display:grid;gap:.9rem;grid-template-columns:repeat(auto-fill,minmax(250px,1fr))}
+.dev-card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
+  padding:.9rem 1rem;display:flex;flex-direction:column;gap:.35rem;
+  transition:border-color .15s, transform .15s}
+.dev-card:hover{border-color:var(--accent);transform:translateY(-1px)}
+.dev-card .ip{font:600 1.05rem var(--mono);color:var(--text)}
+.dev-card .attrs{display:flex;flex-wrap:wrap;gap:.4rem}
+.seen{color:var(--muted);font-size:.85rem}
+.seen[data-ts]{color:var(--accent2)}
+
+/* ---------- chips & badges ---------- */
+.chip{display:inline-block;padding:.1rem .55rem;border-radius:999px;font-size:.78rem;
+  background:var(--panel2);border:1px solid var(--line);color:var(--muted);font-family:var(--mono)}
+.chip.link:hover{border-color:var(--accent);color:var(--accent);text-decoration:none}
+.badge{display:inline-block;padding:.05rem .5rem;border-radius:6px;font-size:.72rem;
+  font-weight:650;font-family:var(--mono);text-transform:uppercase;letter-spacing:.4px}
+.badge.dns{background:#12263f;color:#6db3ff}
+.badge.sni{background:#12322a;color:#7ee2b8}
+.badge.blocked{background:#3b1a1a;color:#ff8080}
+
+/* ---------- tables ---------- */
+table{width:100%;border-collapse:collapse;background:var(--panel);
+  border:1px solid var(--line);border-radius:var(--radius);overflow:hidden}
+thead th{position:sticky;top:var(--topoffset,0);background:var(--panel2);color:var(--muted);
+  font:600 .75rem var(--sans);text-transform:uppercase;letter-spacing:.5px;
+  text-align:left;padding:.55rem .9rem;border-bottom:1px solid var(--line)}
+tbody td{padding:.45rem .9rem;border-bottom:1px solid var(--line);vertical-align:top}
+tbody tr:last-child td{border-bottom:none}
+tbody tr:hover{background:#152030}
+td.time{font-family:var(--mono);color:var(--muted);white-space:nowrap;width:7.5rem}
+td.dom{font-family:var(--mono)}
+
+/* ---------- top bars ---------- */
+.rowbar{display:grid;grid-template-columns:9rem 1fr 4rem;align-items:center;gap:.9rem}
+.bar{height:8px;border-radius:4px;background:var(--panel2);overflow:hidden}
+.bar span{display:block;height:100%;border-radius:4px;background:linear-gradient(90deg,var(--accent),#7c9dff)}
+td .barwrap{display:grid;grid-template-columns:1fr 3.5rem;align-items:center;gap:.8rem}
+
+/* ---------- misc ---------- */
+.empty{padding:2.5rem 1rem;text-align:center;color:var(--muted);
+  background:var(--panel);border:1px dashed var(--line);border-radius:var(--radius)}
+.mute{color:var(--muted)}
+.backlink{color:var(--muted);font-size:.85rem}
+.kv{display:grid;grid-template-columns:auto auto;gap:.25rem 1rem;font-size:.9rem}
+.kv b{color:var(--muted);font-weight:500}
