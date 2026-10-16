@@ -63,3 +63,15 @@ Env overrides: `MONITOR_INTERFACE`, `MONITOR_UPSTREAM_DNS`, `MONITOR_DNS_LISTEN`
 
 Own network, users informed. Metadata only: domains/IP вЂ”
 no HTTPS content, no MITM, no packet capture in this scope.
+
+## Android APK
+
+WebView wrapper (ndroid/): иконка «DNS Monitor» в лаунчере, fullscreen WebView,
+pull-to-refresh, экран ошибки и встроенные Настройки (адрес сервера + API-токен,
+проверка через /healthz). Не TWA: TWA требует HTTPS, монитор работает по HTTP в LAN.
+
+- Готовый APK: GitHub Actions > артефакт app-debug.apk (или собери: см. android/README.md).
+- Установка: db install app-debug.apk или открыть файл на телефоне.
+- Troubleshooting: docs/ANDROID.md.
+- Опциональный токен: web_token: в monitor.yaml (см. monitor.yaml.example); в приложении задать его в Настройках.
+

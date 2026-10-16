@@ -4,6 +4,7 @@ package web
 
 import (
 	"context"
+	"crypto/subtle"
 	"embed"
 	"encoding/json"
 	"errors"
@@ -14,6 +15,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"monitor/internal/store"
@@ -56,14 +58,53 @@ type Server struct {
 	st  Store
 	log *slog.Logger
 	mux *http.ServeMux
+
+	// Token enables optional web_token auth when set (internal/web tests too).
+	// Accepts X-Auth-Token header, ?token= query or auth_token cookie;
+	// /healthz and /static/ stay open. Empty = no auth.
+	Token string
 }
 
 // Handler exposes the router for tests.
-func (s *Server) Handler() http.Handler { return s.mux }
+func (s *Server) Handler() http.Handler { return s.route() }
+
+// route wraps the mux with token auth when a web_token is configured.
+func (s *Server) route() http.Handler {
+	if s.Token == "" {
+		return s.mux
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/healthz" || strings.HasPrefix(r.URL.Path, "/static/") {
+			s.mux.ServeHTTP(w, r)
+			return
+		}
+		tok := r.Header.Get("X-Auth-Token")
+		if tok == "" {
+			tok = r.URL.Query().Get("token")
+		}
+		if tok == "" {
+			if c, err := r.Cookie("auth_token"); err == nil {
+				tok = c.Value
+			}
+		}
+		if subtle.ConstantTimeCompare([]byte(tok), []byte(s.Token)) != 1 {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		if r.URL.Query().Get("token") == s.Token {
+			// First navigation via ?token=: persist for meta-refresh/links.
+			http.SetCookie(w, &http.Cookie{
+				Name: "auth_token", Value: s.Token, Path: "/",
+				MaxAge: 30 * 24 * 3600, HttpOnly: true, SameSite: http.SameSiteLaxMode,
+			})
+		}
+		s.mux.ServeHTTP(w, r)
+	})
+}
 
 // Start serves until ctx is done; returns after listeners closed.
 func (s *Server) Start(ctx context.Context, addr string) error {
-	httpSrv := &http.Server{Addr: addr, Handler: s.mux, ReadHeaderTimeout: 5 * time.Second}
+	httpSrv := &http.Server{Addr: addr, Handler: s.route(), ReadHeaderTimeout: 5 * time.Second}
 	errCh := make(chan error, 1)
 	go func() { errCh <- httpSrv.ListenAndServe() }()
 	select {

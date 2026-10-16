@@ -22,6 +22,7 @@ type Config struct {
 	DoHLogLevel    string   `yaml:"doh_log_level"`        // debug|info|off for dns_blocked_doh
 	DoHWindow      string   `yaml:"doh_aggregate_window"` // e.g. 10s
 	NoiseDomains   []string `yaml:"noise_domains"`        // bg traffic: noise=1 in db, hidden from stdout/feed
+	WebToken       string   `yaml:"web_token"`            // when set: web UI needs X-Auth-Token / ?token= / cookie
 }
 
 const (

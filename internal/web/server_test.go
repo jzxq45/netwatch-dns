@@ -83,6 +83,51 @@ func contains(haystack, needle string) bool {
 	return strings.Contains(haystack, needle)
 }
 
+// TestWebTokenAuth guards the web_token contract: empty token = open;
+// set token closes everything except /healthz and /static/;
+// X-Auth-Token, ?token= (minting a cookie) and cookie all pass.
+func TestWebTokenAuth(t *testing.T) {
+	t.Parallel()
+	srv := New(seedStore(t), nil)
+	srv.Token = "secret-token-1"
+
+	tests := []struct {
+		name    string
+		path    string
+		header  string
+		want    int
+		wantSub string
+	}{
+		{"no token", "/", "", http.StatusUnauthorized, ""},
+		{"wrong token", "/", "nope", http.StatusUnauthorized, ""},
+		{"healthz open", "/healthz", "", http.StatusOK, "ok"},
+		{"static open", "/static/style.css", "", http.StatusOK, "topbar"},
+		{"header ok", "/", "secret-token-1", http.StatusOK, "example.com."},
+		{"query ok mints cookie", "/?token=secret-token-1", "", http.StatusOK, "example.com."},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, tt.path, nil)
+			if tt.header != "" {
+				req.Header.Set("X-Auth-Token", tt.header)
+			}
+			rec := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(rec, req)
+			if rec.Code != tt.want {
+				t.Fatalf("status = %d, want %d; body=%s", rec.Code, tt.want, rec.Body)
+			}
+			if tt.wantSub != "" && !contains(rec.Body.String(), tt.wantSub) {
+				t.Fatalf("body missing %q", tt.wantSub)
+			}
+			if tt.name == "query ok mints cookie" {
+				if len(rec.Result().Cookies()) == 0 {
+					t.Fatal("expected auth_token cookie from ?token=")
+				}
+			}
+		})
+	}
+}
+
 // TestFeedNoiseView guards the noise-visibility UI contract:
 // default view hides noise (and counts it), /?show=all reveals everything,
 // /top excludes noise always.

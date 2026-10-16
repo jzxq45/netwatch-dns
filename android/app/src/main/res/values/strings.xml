@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">DNS Monitor</string>
+    <string name="settings">Настройки</string>
+    <string name="retry">Повторить</string>
+    <string name="yes">Да</string>
+    <string name="no">Нет</string>
+    <string name="first_run_text">Это приложение показывает DNS-логи вашей домашней сети.\n\nВсе данные приходят только с вашего сервера (%1$s) — наружу ничего не отправляется.\n\nПродолжить?</string>
+    <string name="error_no_connection">Не могу подключиться к %1$s.\n\nПроверь Wi-Fi и что monitor.exe запущен на ПК, затем нажми «Повторить» или зайди в «Настройки» и проверь адрес сервера.</string>
+    <string name="server_url">Адрес сервера</string>
+    <string name="api_token">API-токен (необязательно)</string>
+    <string name="test_connection">Проверить соединение</string>
+    <string name="save">Сохранить</string>
+    <string name="reset">Сбросить настройки</string>
+    <string name="status_testing">Проверяю…</string>
+    <string name="status_ok">OK — сервер отвечает</string>
+    <string name="status_http">Сервер ответил HTTP %1$d — проверь адрес/порт</string>
+    <string name="status_fail">Ошибка: %1$s</string>
+</resources>

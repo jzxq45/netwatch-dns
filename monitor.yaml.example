@@ -1,0 +1,20 @@
+# Пример конфигурации monitor.exe.
+# Скопируй как monitor.yaml рядом с monitor.exe и поправь по надобности.
+# Любое поле можно перекрыть переменной окружения MONITOR_*.
+
+upstream_dns: 1.1.1.1:53
+dns_listen: 0.0.0.0:53
+web_listen: 127.0.0.1:8080   # для телефона/планшета: 0.0.0.0:8080
+db_path: monitor.db
+retention_days: 7
+
+doh_blocklist: []            # пусто = встроенный список DoH-эндпоинтов
+skip_ptr: true
+search_suffixes: [IGD_Rostelecom]
+doh_log_level: debug
+doh_aggregate_window: 10s
+
+# web_token: непустая строка включает аутентификацию web-UI:
+# заголовок X-Auth-Token, ?token=... в URL или cookie auth_token.
+# Сгенерировать: powershell -c "[guid]::NewGuid().ToString('N')"
+web_token: ""

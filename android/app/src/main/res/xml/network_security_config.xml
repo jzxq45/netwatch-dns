@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!-- monitor.exe работает по HTTP внутри локальной сети; Android не умеет
+         ограничивать cleartext по подсетям, поэтому разрешаем глобально.
+         Подробности: docs/ANDROID.md -->
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>

@@ -69,7 +69,9 @@ func run() error {
 	g.Go(func() error { return devRes.Start(ctx) })
 
 	// Web UI: read-only on SQLite.
-	g.Go(func() error { return web.New(db, slog.Default()).Start(ctx, cfg.WebListen) })
+	w := web.New(db, slog.Default())
+	w.Token = cfg.WebToken
+	g.Go(func() error { return w.Start(ctx, cfg.WebListen) })
 
 	retention.Start(ctx, db, cfg.RetentionDays)
 
