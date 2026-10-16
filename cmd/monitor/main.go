@@ -56,6 +56,10 @@ func run() error {
 	// dns owns DB writes and stops before the deferred db.Close runs.
 	dnsSrv := dnssrv.New(cfg.UpstreamDNS, db.DB(), slog.Default())
 	dnsSrv.Blocklist = cfg.DoHBlocklist
+	dnsSrv.SkipPTR = cfg.SkipPTR
+	dnsSrv.SearchSuffixes = cfg.SearchSuffixes
+	dnsSrv.DoHLogLevel = cfg.DoHLogLevel
+	dnsSrv.DoHWindow = cfg.DoHWindow
 	devRes := devices.New(db, slog.Default())
 	dnsSrv.OnRecord = func(rec dnssrv.Record) {
 		devRes.Feed(devices.Record{ClientIP: rec.ClientIP, TS: rec.TS})

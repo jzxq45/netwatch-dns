@@ -10,13 +10,17 @@ import (
 )
 
 type Config struct {
-	Interface     string   `yaml:"interface"`    // LAN iface for SNI capture / device resolver
-	UpstreamDNS   string   `yaml:"upstream_dns"` // resolver PC forwards queries to
-	DNSListen     string   `yaml:"dns_listen"`   // UDP+TCP listener for the DNS server
-	WebListen     string   `yaml:"web_listen"`   // web UI / health endpoint
-	DBPath        string   `yaml:"db_path"`      // SQLite file
-	RetentionDays int      `yaml:"retention_days"`
-	DoHBlocklist  []string `yaml:"doh_blocklist"` // replaces built-in list when set
+	Interface      string   `yaml:"interface"`    // LAN iface for SNI capture / device resolver
+	UpstreamDNS    string   `yaml:"upstream_dns"` // resolver PC forwards queries to
+	DNSListen      string   `yaml:"dns_listen"`   // UDP+TCP listener for the DNS server
+	WebListen      string   `yaml:"web_listen"`   // web UI / health endpoint
+	DBPath         string   `yaml:"db_path"`      // SQLite file
+	RetentionDays  int      `yaml:"retention_days"`
+	DoHBlocklist   []string `yaml:"doh_blocklist"`        // replaces built-in list when set
+	SkipPTR        bool     `yaml:"skip_ptr"`             // swallow PTR in-addr.arpa queries locally
+	SearchSuffixes []string `yaml:"search_suffixes"`      // stripped from logged domain names
+	DoHLogLevel    string   `yaml:"doh_log_level"`        // debug|info|off for dns_blocked_doh
+	DoHWindow      string   `yaml:"doh_aggregate_window"` // e.g. 10s
 }
 
 const (
@@ -36,6 +40,9 @@ func Load(path string) (Config, error) {
 		WebListen:     defaultWebListen,
 		DBPath:        defaultDBPath,
 		RetentionDays: defaultRetention,
+		SkipPTR:       true,    // router/OS PTR noise is swallowed by default
+		DoHLogLevel:   "debug", // aggregated blocks stay out of Info output
+		DoHWindow:     "10s",   // aggregation window for dns_blocked_doh
 	}
 	if data, err := os.ReadFile(path); err == nil {
 		if err := yaml.Unmarshal(data, &cfg); err != nil {

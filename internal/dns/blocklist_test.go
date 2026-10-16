@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -12,10 +13,14 @@ import (
 	"monitor/internal/store"
 )
 
-// noErrorHandler answers NOERROR for anything — proves blocked queries never
-// reach upstream's handler.
-func noErrorHandler() dns.Handler {
+// captureUpstream answers NOERROR for anything and records every question
+// name it receives (proves blocked queries never reach it, and forwarded
+// names keep their original form).
+func captureUpstream(got *capNames) dns.Handler {
 	return dns.HandlerFunc(func(w dns.ResponseWriter, r *dns.Msg) {
+		got.mu.Lock()
+		got.names = append(got.names, r.Question[0].Name)
+		got.mu.Unlock()
 		m := new(dns.Msg)
 		m.SetReply(r)
 		//nolint:errcheck // in-memory fake conn; only a lost UDP packet
@@ -23,9 +28,21 @@ func noErrorHandler() dns.Handler {
 	})
 }
 
-func startBlockTestServer(t *testing.T, override []string) (addr string, db *store.Store) {
+type capNames struct {
+	mu    sync.Mutex
+	names []string
+}
+
+func (c *capNames) has(name string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.names) > 0 && c.names[len(c.names)-1] == name
+}
+
+func startBlockTestServer(t *testing.T, setup func(*Server)) (addr string, db *store.Store) {
 	t.Helper()
-	up := startUpstream(t, noErrorHandler())
+	var cap capNames
+	up := startUpstream(t, captureUpstream(&cap))
 
 	db, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
@@ -41,7 +58,9 @@ func startBlockTestServer(t *testing.T, override []string) (addr string, db *sto
 	_ = l.Close()
 
 	srv := New(up, db.DB(), nil)
-	srv.Blocklist = override
+	if setup != nil {
+		setup(srv)
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -112,7 +131,9 @@ func TestDoHBlocklist(t *testing.T) {
 
 func TestDoHBlocklistOverride(t *testing.T) {
 	t.Parallel()
-	addr, _ := startBlockTestServer(t, []string{"blocked.example", "other.blocked.example"})
+	addr, _ := startBlockTestServer(t, func(s *Server) {
+		s.Blocklist = []string{"blocked.example", "other.blocked.example"}
+	})
 
 	tests := []struct {
 		name string

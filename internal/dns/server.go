@@ -57,7 +57,17 @@ type Server struct {
 	// Blocklist replaces defaultDoHBlocklist when set before Start.
 	Blocklist []string
 
-	blocklist []string // normalized effective list (Set by New/Start)
+	// Log-filter knobs (set before Start):
+	SkipPTR        bool     // answer empty NOERROR for PTR in-addr.arpa; no log/upstream
+	SearchSuffixes []string // LAN search suffixes stripped from logged names only
+	DoHLogLevel    string   // debug|info|off for dns_blocked_doh lines
+	DoHWindow      string   // aggregation window, e.g. "10s"
+
+	blocklist []string // normalized effective list (set by New/Start)
+	dohLevel  slog.Level
+	window    time.Duration
+	suffixes  []string // normalized lowercase search suffixes
+	aggr      *blockAggregator
 }
 
 func New(upstream string, db *sql.DB, log *slog.Logger) *Server {
@@ -114,11 +124,31 @@ func (s *Server) Start(ctx context.Context, addr string) error {
 		// YAML replaces the built-in list entirely; normalize once (no concurrency).
 		s.blocklist = normalizeEntries(s.Blocklist)
 	}
+	s.dohLevel = dohLevel(s.DoHLogLevel)
+	s.window = parseWindow(s.DoHWindow, 10*time.Second, s.log)
+	s.suffixes = normalizeEntries(s.SearchSuffixes)
+	s.aggr = newBlockAggregator(s.dohLevel, s.log)
+
 	eg, egctx := errgroup.WithContext(sctx)
 	for _, srv := range []*dns.Server{udp, tcp} {
 		srv := srv
 		eg.Go(func() error { return serve(egctx, srv) })
 	}
+	// Block-log flusher: one aggregated line per (client, domain) per window;
+	// final flush on ctx done, before Start returns.
+	eg.Go(func() error {
+		t := time.NewTicker(s.window)
+		defer t.Stop()
+		for {
+			select {
+			case <-egctx.Done():
+				s.aggr.flush()
+				return nil
+			case <-t.C:
+				s.aggr.flush()
+			}
+		}
+	})
 	err := eg.Wait()
 	cancel()   // sink exits via sctx.Done
 	<-sinkDone // drain+flush finished — safe for caller to close the DB
@@ -158,18 +188,36 @@ func (s *Server) handle(w dns.ResponseWriter, r *dns.Msg) {
 		return
 	}
 	q := r.Question[0]
-	rec := Record{ClientIP: clientIP, Domain: q.Name, QType: dns.TypeToString[q.Qtype], TS: ts}
-	s.log.Info("dns query", "client", clientIP, "domain", q.Name, "qtype", dns.TypeToString[q.Qtype], "ts", ts)
+	// Search suffixes are stripped for logging/storage only; upstream always
+	// sees the original name so LAN names like "foo.IGD_Rostelecom" resolve.
+	domain := stripSuffixes(q.Name, s.suffixes)
+	rec := Record{ClientIP: clientIP, Domain: domain, QType: dns.TypeToString[q.Qtype], TS: ts}
+
+	if s.SkipPTR && q.Qtype == dns.TypePTR && strings.HasSuffix(strings.ToLower(q.Name), ".in-addr.arpa.") {
+		// PTR noise: answer empty NOERROR locally; client activity still
+		// reaches the devices feed, but dns_log and upstream stay clean.
+		if s.OnRecord != nil {
+			s.OnRecord(rec)
+		}
+		empty := new(dns.Msg)
+		empty.SetReply(r)
+		//nolint:errcheck // miekg writes to an in-memory conn; failure is only a lost packet
+		_ = w.WriteMsg(empty)
+		return
+	}
+
+	s.log.Info("dns query", "client", clientIP, "domain", domain, "qtype", dns.TypeToString[q.Qtype], "ts", ts)
 	if s.OnRecord != nil {
 		s.OnRecord(rec)
 	}
-	if !s.snk.TrySend(clientIP, q.Name, dns.TypeToString[q.Qtype], ts) {
+	if !s.snk.TrySend(clientIP, domain, dns.TypeToString[q.Qtype], ts) {
 		// Overflow is dropped instead of stalling the serve loop.
-		s.log.Warn("dns queue full, record dropped", "client", clientIP, "domain", q.Name)
+		s.log.Warn("dns queue full, record dropped", "client", clientIP, "domain", domain)
 	}
 	if s.isBlocked(q.Name) {
-		// DoH endpoints: answered NXDOMAIN here; router rules can't keep up.
-		s.log.Info("dns_blocked_doh", "client", clientIP, "domain", q.Name)
+		// DoH endpoints are answered NXDOMAIN here; the request itself is
+		// aggregated: one dns_blocked_doh line per (client, domain) per window.
+		s.aggr.add(clientIP, domain)
 		nxdomain(w, r)
 		return
 	}
