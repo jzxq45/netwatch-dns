@@ -8,7 +8,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Android APK](https://img.shields.io/badge/Android-APK-3DDC84?logo=android)](android/README.md)
 
-*(плейсхолдеры: после первого пуша поменять `jzxq45` на владельца репозитория)*
+*(`github.com/jzxq45/netwatch-dns`)*
 
 ---
 
