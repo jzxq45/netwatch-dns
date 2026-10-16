@@ -1,9 +1,12 @@
 package dns
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"net"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -31,6 +34,25 @@ func captureUpstream(got *capNames) dns.Handler {
 type capNames struct {
 	mu    sync.Mutex
 	names []string
+}
+
+// syncBuffer is a mutex-guarded bytes.Buffer: the leaky logger writes from
+// the flusher goroutine while the test polls the text concurrently.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.String()
 }
 
 func (c *capNames) has(name string) bool {
@@ -74,6 +96,85 @@ func startBlockTestServer(t *testing.T, setup func(*Server)) (addr string, db *s
 	return addr, db
 }
 
+// TestDoHBlockedLogEmitted is the regression guard for the DoH pipeline:
+// dns.google must return NXDOMAIN and produce a dns_blocked_doh line (after
+// one aggregation window), without ever reaching upstream.
+func TestDoHBlockedLogEmitted(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("network bind test")
+	}
+	var cap capNames
+	up := startUpstream(t, captureUpstream(&cap))
+
+	db, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("store open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	var logs syncBuffer
+	log := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	// Default blocklist (Blocklist stays nil), short window for fast flush.
+	srv := New(up, db.DB(), log)
+	srv.DoHWindow = "50ms"
+	srv.DoHLogLevel = "debug"
+
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("probe: %v", err)
+	}
+	addr := l.Addr().String()
+	_ = l.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- srv.Start(ctx, addr) }()
+	select {
+	case err := <-serveErr:
+		t.Fatalf("server exited immediately: %v", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	c := &dns.Client{Timeout: 3 * time.Second}
+	for i := 0; i < 2; i++ {
+		m := new(dns.Msg)
+		m.SetQuestion("dns.google.", dns.TypeA)
+		resp, _, err := c.Exchange(m, addr)
+		if err != nil {
+			t.Fatalf("exchange: %v", err)
+		}
+		if resp.Rcode != dns.RcodeNameError {
+			t.Fatalf("query %d: rcode=%d, want NXDOMAIN", i, resp.Rcode)
+		}
+	}
+
+	// Never forwarded upstream.
+	cap.mu.Lock()
+	forwarded := len(cap.names)
+	cap.mu.Unlock()
+	if forwarded != 0 {
+		t.Fatalf("blocked query reached upstream %d times", forwarded)
+	}
+
+	// Exactly one aggregated line with count=2 after the 50ms window.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		s := logs.String()
+		if strings.Contains(s, "msg=dns_blocked_doh") && strings.Contains(s, "count=2") {
+			if n := strings.Count(s, "msg=dns_blocked_doh"); n != 1 {
+				t.Fatalf("want 1 aggregated line, got %d:\n%s", n, s)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("dns_blocked_doh never emitted:\n%s", s)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
 func TestDoHBlocklist(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {
