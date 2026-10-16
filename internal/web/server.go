@@ -92,7 +92,7 @@ const pageTail = `</body></html>`
 
 const contentFeed = `
 <h2>live feed (last {{len .Events}})</h2>
-<table><tr><th>time</th><th>kind</th><th>device</th><th>query/sni</th></tr>
+<table><tr><th>time</th><th>kind</th><th>device</th><th>domain</th></tr>
 {{range .Events}}<tr><td>{{tsfmt .TS}}</td><td>{{.Kind}}</td><td>{{.ClientIP}}</td><td>{{.Name}}</td></tr>{{end}}
 </table>`
 
