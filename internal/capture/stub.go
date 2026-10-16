@@ -3,24 +3,17 @@
 package capture
 
 import (
-	"context"
 	"errors"
 	"log/slog"
 
 	"monitor/internal/sni"
 )
 
-// New returns the capture backend available on this build/runtime. The stub
-// reports why capture is unavailable; the pcap backend arrives via build tag `pcap`.
-func New(iface string, log *slog.Logger) sni.Source {
+// New returns the capture backend for this build. The stub always reports
+// why capture is unavailable; the pcap backend arrives via build tag `pcap`.
+func New(iface string, log *slog.Logger) (sni.Source, error) {
 	if iface == "" {
-		return stub{why: "config: interface not set"}
+		return nil, errors.New("config: interface not set")
 	}
-	return stub{why: "this build has no capture backend (needs Npcap + -tags pcap)"}
-}
-
-type stub struct{ why string }
-
-func (s stub) Start(_ context.Context) (<-chan sni.Frame, error) {
-	return nil, errors.New(s.why)
+	return nil, errors.New("this build has no capture backend (needs Npcap + -tags pcap)")
 }

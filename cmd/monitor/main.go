@@ -17,6 +17,7 @@ import (
 	dnssrv "monitor/internal/dns"
 	"monitor/internal/sni"
 	"monitor/internal/store"
+	"monitor/internal/web"
 )
 
 func main() {
@@ -67,15 +68,18 @@ func run() error {
 	sniff.OnRecord = func(clientIP, host string, ts int64) {
 		devRes.Feed(devices.Record{ClientIP: clientIP, TS: ts})
 	}
-	src := capture.New(cfg.Interface, slog.Default())
-	if _, err := src.Start(ctx); err != nil {
+	// Capture is best-effort: its absence only disables SNI (+ARP) data.
+	src, err := capture.New(cfg.Interface, slog.Default())
+	if err != nil {
 		slog.Warn("capture unavailable, SNI sniffer disabled", "reason", err.Error())
 	} else {
 		g.Go(func() error { return sniff.Start(ctx, src) })
 	}
 
+	// Web UI: read-only on SQLite.
+	g.Go(func() error { return web.New(db, slog.Default()).Start(ctx, cfg.WebListen) })
+
 	slog.Info("started",
-		"db", cfg.DBPath,
 		"dns", cfg.DNSListen,
 		"upstream", cfg.UpstreamDNS,
 		"web", cfg.WebListen)
