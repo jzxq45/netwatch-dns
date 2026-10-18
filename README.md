@@ -79,19 +79,41 @@
 ## Requirements
 
 - A host that is always on: Windows / Linux / Raspberry Pi.
-- Go 1.23+ to build (or use the CI artifacts).
+- Go 1.23+ to build — **or grab the ready-made Windows binaries** (see below).
 - Admin rights only for port 53 on Windows (see [Troubleshooting]).
 - Your router must allow setting the LAN DNS server (almost all do; see
   [docs/ROUTER-SETUP.md](docs/ROUTER-SETUP.md)).
 
+## Downloads (Windows, no build needed)
+
+Grab [`netwatch-windows-amd64.zip`](https://github.com/jzxq45/netwatch-dns/releases/latest)
+from GitHub Releases. It contains:
+
+- **`netwatch.exe`** — desktop app: a window with the live UI (WebView2).
+  Closing the window stops the servers gracefully. Double-click it and you
+  are done. Errors surface as native dialogs; logs land in `netwatch.log`
+  next to the binary. Requires the WebView2 runtime (preinstalled on
+  Windows 11; on old Windows 10 installs it via https://aka.ms/webview2 —
+  otherwise the UI automatically opens in your default browser).
+- **`monitor.exe`** — classic console server (for scheduled tasks, services,
+  remote hosts): same engine, logs to stdout.
+- `monitor.yaml.example` — annotated config template.
+
+Both binaries are built with `CGO_ENABLED=0` and embed everything (UI, static
+assets); only the WebView2 runtime on the user's machine is external.
+
 ## Quick Start
 
-### 1. Build
+### 1. Get the binary
+
+Either put `netwatch.exe` from the [releases zip](#downloads-windows-no-build-needed)
+next to a `monitor.yaml`, or build from source:
 
 ```
 git clone https://github.com/jzxq45/netwatch-dns && cd netwatch-dns
 # Windows (PowerShell):
-$env:CGO_ENABLED='0'; go build -o monitor.exe ./cmd/monitor
+$env:CGO_ENABLED='0'; go build -o monitor.exe ./cmd/monitor          # console
+$env:CGO_ENABLED='0'; go build -ldflags "-s -w -H windowsgui" -o netwatch.exe ./cmd/netwatch  # GUI window
 # Linux/macOS:
 CGO_ENABLED=0 go build -o monitor ./cmd/monitor
 ```
@@ -117,10 +139,12 @@ Router → DHCP settings → bind the host MAC to a fixed lease
 ### 4. Run monitor
 
 ```
-.\monitor.exe          # keep the window open — this is the server
+.\netwatch.exe         # desktop window with the UI; closing it stops everything cleanly
+.\monitor.exe          # console server — keep the window open; for scripts/services
 # or as a scheduled task / systemd unit: see deploy/monitor.service (Linux)
 ```
-Output: `msg=started db=… dns=0.0.0.0:53 upstream=1.1.1.1:53 web=127.0.0.1:8080`.
+Output (console build): `msg=started db=… dns=0.0.0.0:53 upstream=1.1.1.1:53 web=127.0.0.1:8080`.
+The GUI build writes the same lines to `netwatch.log` next to the binary.
 
 ### 5. Verify locally
 
@@ -165,6 +189,7 @@ doh_log_level: debug         # debug | info | off for nx-on-DoH log lines
 doh_aggregate_window: 10s    # one aggregated line per (client, domain) per window
 
 # web_token: when non-empty, the UI requires X-Auth-Token / ?token=… / cookie
+# (netwatch.exe signs in by itself — it navigates with ?token= once and keeps the cookie)
 web_token: ""
 
 # Extra background domains to keep out of the feed (still stored with noise=1):
@@ -189,6 +214,7 @@ members, do not use logs against people, keep logs local, do not republish.
 
 | Symptom | Fix |
 | --- | --- |
+| netwatch.exe shows "Server failed to start … bind:" | the port is taken (see next row) — free port 53 or change `dns_listen`/`web_listen` in `monitor.yaml` and start again |
 | `bind: ...` port 53 busy at start | [docs/WINDOWS-PORT53.md](docs/WINDOWS-PORT53.md) or set `dns_listen: 0.0.0.0:5300` |
 | Devices never appear in `/devices` | router still hands out the old DNS (reconnect the client); verify DHCP config |
 | Phone can reach `:8080`? No — "connection refused" | check `web_listen` is `0.0.0.0:8080` and add a Windows firewall rule for TCP 8080 |
@@ -204,7 +230,12 @@ More: [docs/ANDROID.md](docs/ANDROID.md) (mobile app specifics).
 - [x] DNS server, logging, retention, web UI, DoH enforcement
 - [x] Noise separation (noise=1 rows, hidden by default)
 - [x] Android WebView app, optional web_token
-- [ ] LAN-only bind / DNS rate limits (hardening)
+- [x] Hardening: full server timeouts, panic recovery, per-IP rate limiting,
+      read/write DB pool split, chunked retention, DNS admission control +
+      LAN-only ACL, expvar counters exposed at `/metrics`
+- [x] Windows desktop app (`netwatch.exe`, WebView2 window, graceful close)
+- [ ] DNS response cache + upstream connection reuse (remove per-query sockets)
+- [ ] Blocklist feed loading (URL/input lists) — the Pi-hole-style win
 - [ ] Device names via DHCP lease reading (admin side, no sniffing)
 - [ ] SNI + NetFlow when a router supports mirroring/flow export
   (schema slots `sni_log`/`flow_log` already exist)

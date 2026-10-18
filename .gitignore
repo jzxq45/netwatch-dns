@@ -10,6 +10,7 @@ dist/
 *.db-shm
 *.db-journal
 *.log
+.webview2/
 
 # --- Android ---
 android/.gradle/

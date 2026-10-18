@@ -78,19 +78,41 @@
 ## Требования
 
 - Всегда включённый хост: Windows / Linux / Raspberry Pi.
-- Go 1.23+ для сборки (или использовать артефакты CI).
+- Go 1.23+ для сборки — **или скачай готовые Windows-бинарники** (см. ниже).
 - Права администратора — только для порта 53 на Windows (см. Troubleshooting).
 - Роутер, который позволяет задать LAN DNS (почти все умеют; см.
   [docs/ROUTER-SETUP.md](docs/ROUTER-SETUP.md)).
 
+## Готовые сборки (Windows, без Go)
+
+Скачай [`netwatch-windows-amd64.zip`](https://github.com/jzxq45/netwatch-dns/releases/latest)
+со страницы GitHub Releases. Внутри:
+
+- **`netwatch.exe`** — настольное приложение: окно с живым интерфейсом
+  (WebView2). Закрытие окна штатно останавливает все сервисы. Запустил
+  двойным щелчком — и всё. Ошибки всплывают нативными диалогами, логи — в
+  `netwatch.log` рядом с бинарником. Нужен WebView2 runtime (предустановлен
+  в Windows 11; на старых Windows 10 ставится с https://aka.ms/webview2 —
+  иначе интерфейс автоматически откроется в обычном браузере).
+- **`monitor.exe`** — классический консольный сервер (для планировщика,
+  служб, удалённых хостов): тот же движок, логи в stdout.
+- `monitor.yaml.example` — конфиг с комментариями.
+
+Оба бинарника собраны с `CGO_ENABLED=0` и содержат всё (UI, статику);
+снаружи — только WebView2 runtime на машине пользователя.
+
 ## Быстрый старт
 
-### 1. Сборка
+### 1. Получить бинарник
+
+Положи `netwatch.exe` из [архива релизов](#готовые-сборки-windows-без-go)
+рядом с `monitor.yaml` — либо собери из исходников:
 
 ```
 git clone https://github.com/jzxq45/netwatch-dns && cd netwatch-dns
 # Windows (PowerShell):
-$env:CGO_ENABLED='0'; go build -o monitor.exe ./cmd/monitor
+$env:CGO_ENABLED='0'; go build -o monitor.exe ./cmd/monitor           # консоль
+$env:CGO_ENABLED='0'; go build -ldflags "-s -w -H windowsgui" -o netwatch.exe ./cmd/netwatch  # окно GUI
 # Linux/macOS:
 CGO_ENABLED=0 go build -o monitor ./cmd/monitor
 ```
@@ -116,10 +138,12 @@ sc.exe config dnscache start= disabled; net stop dnscache
 ### 4. Запустить monitor
 
 ```
-.\monitor.exe          # окно не закрывать — это и есть сервер
+.\netwatch.exe         # окно с интерфейсом; закрытие окна = корректная остановка
+.\monitor.exe          # консольный сервер — окно не закрывать; для скриптов/служб
 # либо scheduled task / systemd unit: deploy/monitor.service (Linux)
 ```
-Вывод: `msg=started db=… dns=0.0.0.0:53 upstream=1.1.1.1:53 web=127.0.0.1:8080`.
+Вывод (консольная сборка): `msg=started db=… dns=0.0.0.0:53 upstream=1.1.1.1:53 web=127.0.0.1:8080`.
+GUI-сборка пишет те же строки в `netwatch.log` рядом с бинарником.
 
 ### 5. Проверить локально
 
@@ -165,6 +189,7 @@ doh_log_level: debug         # debug | info | off для строк анализ
 doh_aggregate_window: 10s    # одна агрегированная строка на окно (client, domain)
 
 # web_token: если непусто — UI требует X-Auth-Token / ?token=… / cookie
+# (netwatch.exe логинится сам: первый переход с ?token= создаёт cookie)
 web_token: ""
 
 # фоновые домены вне ленты (в БД пишутся с noise=1):
@@ -190,6 +215,7 @@ noise_domains:
 
 | Симптом | Решение |
 | --- | --- |
+| netwatch.exe показывает «Server failed to start … bind:» | порт занят (см. следующую строку) — освободи порт 53 или поменяй `dns_listen`/`web_listen` в `monitor.yaml` и запусти снова |
 | `bind: ...` порт 53 занят при старте | [docs/WINDOWS-PORT53.md](docs/WINDOWS-PORT53.md) или `dns_listen: 0.0.0.0:5300` |
 | Устройства не появляются в `/devices` | роутер всё ещё раздаёт старый DNS (переподключи клиент); проверь настройку DHCP |
 | С телефона `:8080` недоступен — connection refused | проверь `web_listen: 0.0.0.0:8080` и правило firewall для TCP 8080 |
@@ -205,7 +231,12 @@ noise_domains:
 - [x] DNS-сервер, логирование, retention, web UI, DoH enforcement
 - [x] Разделение шума (rows noise=1, скрыты по умолчанию)
 - [x] Android WebView-приложение, опциональный web_token
-- [ ] LAN-only bind / rate limit на DNS (hardening)
+- [x] Hardening: полные таймауты сервера, panic recovery, per-IP rate limiting,
+      разделение пулов read/write, чанкованный retention, DNS admission
+      control + LAN-only ACL, счётчики expvar на `/metrics`
+- [x] Настольное приложение Windows (`netwatch.exe`, окно WebView2, graceful close)
+- [ ] DNS-кэш + переиспользование upstream-соединений (убрать сокет на запрос)
+- [ ] Подгрузка blocklist-фидов (URL/списки) — «фишка в стиле Pi-hole»
 - [ ] Имена устройств через чтение DHCP-аренд (админская сторона, без сниффинга)
 - [ ] SNI + NetFlow, когда роутер поддерживает зеркалирование/экспорт потоков
   (слоты `sni_log`/`flow_log` в схеме уже есть)

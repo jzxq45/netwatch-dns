@@ -17,10 +17,14 @@ func Start(ctx context.Context, db *store.Store, days int) error {
 	tick := time.NewTicker(24 * time.Hour)
 	defer tick.Stop()
 	cutoff := func() int64 { return time.Now().AddDate(0, 0, -days).Unix() }
-	sweep := func() {
+	// sweep returns false when ctx is canceled — a normal shutdown, not an error.
+	sweep := func() bool {
 		for table := range store.RetentionTables {
 			n, err := db.DeleteOld(ctx, table, cutoff())
 			if err != nil {
+				if ctx.Err() != nil {
+					return false
+				}
 				slog.Error("retention", "table", table, "err", err)
 				continue
 			}
@@ -28,15 +32,20 @@ func Start(ctx context.Context, db *store.Store, days int) error {
 				slog.Info("retention", "table", table, "deleted", n)
 			}
 		}
+		return true
 	}
 	// Startup sweep covers long offline gaps after host downtime.
-	sweep()
+	if !sweep() {
+		return nil
+	}
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
 		case <-tick.C:
-			sweep()
+			if !sweep() {
+				return nil
+			}
 		}
 	}
 }
