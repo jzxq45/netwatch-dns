@@ -17,7 +17,7 @@ import (
 // TestIsNoise: wildcard boundary semantics per spec.
 func TestIsNoise(t *testing.T) {
 	t.Parallel()
-	s := New("127.0.0.1:9953", nil, nil)
+	s := New(Config{Upstream: "127.0.0.1:9953"}, nil, nil)
 	tests := []struct {
 		name string
 		q    string
@@ -62,8 +62,7 @@ func TestNoisePathIntegration(t *testing.T) {
 	// Info handler: noise domain must produce zero Info lines.
 	log := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
-	srv := New(up, db.DB(), log)
-	srv.NoiseDomains = []string{"*.gstatic.com", "mtalk.google.com"}
+	srv := New(Config{Upstream: up, NoiseDomains: []string{"*.gstatic.com", "mtalk.google.com"}}, db.DB(), log)
 
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

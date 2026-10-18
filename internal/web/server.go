@@ -3,17 +3,21 @@
 package web
 
 import (
+	"bytes"
 	"context"
 	"crypto/subtle"
 	"embed"
 	"encoding/json"
 	"errors"
+	"expvar"
 	"fmt"
 	"html/template"
+	"io"
 	"io/fs"
 	"log/slog"
 	"net"
 	"net/http"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"time"
@@ -43,7 +47,7 @@ func New(st Store, log *slog.Logger) *Server {
 		log = slog.Default()
 	}
 	mux := http.NewServeMux()
-	s := &Server{st: st, log: log, mux: mux}
+	s := &Server{st: st, log: log, mux: mux, lim: newLimiter(rateLimitRPS, rateLimitBurst)}
 	mux.HandleFunc("GET /{$}", s.feed)
 	mux.HandleFunc("GET /devices", s.devices)
 	mux.HandleFunc("GET /device", s.deviceLog)
@@ -51,6 +55,9 @@ func New(st Store, log *slog.Logger) *Server {
 	mux.HandleFunc("GET /static/", s.static)
 	mux.HandleFunc("GET /api/events", s.apiEvents)
 	mux.HandleFunc("GET /healthz", s.healthz)
+	// expvar counters/gauges (drops, in-flight, refused) — gated by token auth
+	// when web_token is set, like every non-exception route.
+	mux.Handle("GET /metrics", expvar.Handler())
 	return s
 }
 
@@ -58,6 +65,7 @@ type Server struct {
 	st  Store
 	log *slog.Logger
 	mux *http.ServeMux
+	lim *limiter
 
 	// Token enables optional web_token auth when set (internal/web tests too).
 	// Accepts X-Auth-Token header, ?token= query or auth_token cookie;
@@ -68,14 +76,21 @@ type Server struct {
 // Handler exposes the router for tests.
 func (s *Server) Handler() http.Handler { return s.route() }
 
-// route wraps the mux with token auth when a web_token is configured.
+// route chains the mux with, outermost first: security headers → panic
+// recovery → per-IP rate limit → token auth.
 func (s *Server) route() http.Handler {
+	var h http.Handler = s.mux
 	if s.Token == "" {
-		return s.mux
+		return securityHeaders(s.recovery(rateLimit(s.lim, h)))
 	}
+	return securityHeaders(s.recovery(rateLimit(s.lim, s.tokenAuth(h))))
+}
+
+// tokenAuth guards h with the configured web token.
+func (s *Server) tokenAuth(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/healthz" || strings.HasPrefix(r.URL.Path, "/static/") {
-			s.mux.ServeHTTP(w, r)
+			h.ServeHTTP(w, r)
 			return
 		}
 		tok := r.Header.Get("X-Auth-Token")
@@ -93,18 +108,56 @@ func (s *Server) route() http.Handler {
 		}
 		if r.URL.Query().Get("token") == s.Token {
 			// First navigation via ?token=: persist for meta-refresh/links.
+			// Secure is set for TLS requests only — on plain 127.0.0.1 the
+			// cookie must work without HTTPS.
 			http.SetCookie(w, &http.Cookie{
 				Name: "auth_token", Value: s.Token, Path: "/",
 				MaxAge: 30 * 24 * 3600, HttpOnly: true, SameSite: http.SameSiteLaxMode,
+				Secure: r.TLS != nil,
 			})
 		}
-		s.mux.ServeHTTP(w, r)
+		h.ServeHTTP(w, r)
+	})
+}
+
+// recovery converts handler panics into 500 responses instead of letting a
+// panic kill the whole process.
+func (s *Server) recovery(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if p := recover(); p != nil {
+				s.log.Error("http panic", "path", r.URL.Path, "panic", p, "stack", string(debug.Stack()))
+				http.Error(w, "internal server error", http.StatusInternalServerError)
+			}
+		}()
+		h.ServeHTTP(w, r)
+	})
+}
+
+// securityHeaders sets baseline browser protections on every response.
+func securityHeaders(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hh := w.Header()
+		hh.Set("X-Content-Type-Options", "nosniff")
+		hh.Set("X-Frame-Options", "DENY")
+		hh.Set("Referrer-Policy", "no-referrer")
+		// 'unsafe-inline' for style-src covers the style="" attributes the
+		// templates use; script-src 'self' covers /static/app.js.
+		hh.Set("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:")
+		h.ServeHTTP(w, r)
 	})
 }
 
 // Start serves until ctx is done; returns after listeners closed.
 func (s *Server) Start(ctx context.Context, addr string) error {
-	httpSrv := &http.Server{Addr: addr, Handler: s.route(), ReadHeaderTimeout: 5 * time.Second}
+	httpSrv := &http.Server{
+		Addr:              addr,
+		Handler:           s.route(),
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second, // GET-only pages; covers slow clients
+		WriteTimeout:      15 * time.Second, // caps stuck handler writes
+		IdleTimeout:       60 * time.Second, // UI keep-alives refresh every 5s
+	}
 	errCh := make(chan error, 1)
 	go func() { errCh <- httpSrv.ListenAndServe() }()
 	select {
@@ -246,17 +299,30 @@ func page(content string) *template.Template {
 	return t
 }
 
-// render executes a parsed page. Path feeds the top-bar nav highlighting.
-func render(w http.ResponseWriter, status int, t *template.Template, path string, data any) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.WriteHeader(status)
+// fail logs the real error and returns a generic 500 — raw error strings
+// could leak DB or filesystem internals to the client.
+func (s *Server) fail(w http.ResponseWriter, what string, err error) {
+	s.log.Error(what, "err", err)
+	http.Error(w, "internal server error", http.StatusInternalServerError)
+}
+
+// render executes a parsed page into a buffer first: a template error must
+// not reach the client as a truncated 200-response.
+func (s *Server) render(w http.ResponseWriter, status int, t *template.Template, path string, data any) {
+	var buf bytes.Buffer
 	inner := struct {
 		Path string
 		Data any
 	}{path, data}
-	if err := t.Execute(w, inner); err != nil {
-		slog.Error("web render", "err", err)
+	if err := t.Execute(&buf, inner); err != nil {
+		// The client gets nothing: a clean 500 beats half a page.
+		s.log.Error("web render", "err", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
 	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(status)
+	_, _ = io.Copy(w, &buf)
 }
 
 func (s *Server) feed(w http.ResponseWriter, r *http.Request) {
@@ -271,21 +337,21 @@ func (s *Server) feed(w http.ResponseWriter, r *http.Request) {
 		events, err = s.st.RecentEvents(r.Context(), feedLimit)
 	}
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		s.fail(w, "feed events", err)
 		return
 	}
 	// Hidden-noise counter: noise rows at or after the oldest shown row.
 	hidden := 0
 	if len(events) > 0 {
 		if hidden, err = s.st.NoisyEventsSince(r.Context(), events[len(events)-1].TS); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			s.fail(w, "feed noise count", err)
 			return
 		}
 		if showAll {
 			hidden = 0
 		}
 	}
-	render(w, http.StatusOK, page(contentFeed), "/", struct {
+	s.render(w, http.StatusOK, page(contentFeed), "/", struct {
 		Events  []store.Event
 		ShowAll bool
 		Hidden  int
@@ -295,10 +361,10 @@ func (s *Server) feed(w http.ResponseWriter, r *http.Request) {
 func (s *Server) devices(w http.ResponseWriter, r *http.Request) {
 	ds, err := s.st.ListDevices(r.Context())
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		s.fail(w, "devices list", err)
 		return
 	}
-	render(w, http.StatusOK, page(contentDevices), "/devices", struct {
+	s.render(w, http.StatusOK, page(contentDevices), "/devices", struct {
 		Devices []store.DeviceRow
 	}{ds})
 }
@@ -311,7 +377,7 @@ func (s *Server) deviceLog(w http.ResponseWriter, r *http.Request) {
 	}
 	dev, err := s.st.DeviceByIP(r.Context(), ip)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		s.fail(w, "device lookup", err)
 		return
 	}
 	if dev == nil {
@@ -320,10 +386,10 @@ func (s *Server) deviceLog(w http.ResponseWriter, r *http.Request) {
 	}
 	events, err := s.st.DeviceEvents(r.Context(), ip, feedLimit)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		s.fail(w, "device events", err)
 		return
 	}
-	render(w, http.StatusOK, page(contentDevice), "/device", struct {
+	s.render(w, http.StatusOK, page(contentDevice), "/device", struct {
 		Dev    *store.DeviceRow
 		Events []store.Event
 	}{dev, events})
@@ -341,7 +407,7 @@ func (s *Server) top(w http.ResponseWriter, r *http.Request) {
 	}
 	rows, err := s.st.TopDomains(r.Context(), time.Now().Add(-d).Unix(), feedLimit*10)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		s.fail(w, "top domains", err)
 		return
 	}
 	max := 0
@@ -350,7 +416,7 @@ func (s *Server) top(w http.ResponseWriter, r *http.Request) {
 			max = row.Count
 		}
 	}
-	render(w, http.StatusOK, page(contentTop), "/top", struct {
+	s.render(w, http.StatusOK, page(contentTop), "/top", struct {
 		Rows   []store.TopRow
 		Period string
 		Max    int
@@ -361,7 +427,7 @@ func (s *Server) top(w http.ResponseWriter, r *http.Request) {
 func (s *Server) static(w http.ResponseWriter, r *http.Request) {
 	sub, err := fs.Sub(staticFS, "static")
 	if err != nil {
-		http.Error(w, "static fs: "+err.Error(), http.StatusInternalServerError)
+		s.fail(w, "static fs", err)
 		return
 	}
 	http.StripPrefix("/static/", http.FileServerFS(sub)).ServeHTTP(w, r)
@@ -380,8 +446,11 @@ func (s *Server) apiEvents(w http.ResponseWriter, r *http.Request) {
 	}
 	events, err := s.st.EventsSince(r.Context(), since, apiLimit)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		s.fail(w, "api events", err)
 		return
+	}
+	if events == nil {
+		events = []store.Event{} // JSON [] instead of null — the API contract
 	}
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(events); err != nil { //nolint:errcheck // client may vanish mid-write

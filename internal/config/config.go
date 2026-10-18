@@ -3,6 +3,8 @@ package config
 import (
 	"errors"
 	"fmt"
+	"log/slog"
+	"net"
 	"os"
 	"strconv"
 
@@ -52,6 +54,11 @@ func Load(path string) (Config, error) {
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return Config{}, fmt.Errorf("read %s: %w", path, err)
+	} else {
+		// Missing file is allowed, but must not stay silent: operators should
+		// know defaults are in effect instead of wondering why their config
+		// "didn't apply".
+		slog.Warn("config file not found, defaults apply", "path", path)
 	}
 	for _, o := range overrides(&cfg) {
 		if v := os.Getenv(o.env); v != "" {
@@ -62,6 +69,19 @@ func Load(path string) (Config, error) {
 	}
 	if cfg.RetentionDays < 1 {
 		return Config{}, fmt.Errorf("retention_days must be >= 1, got %d", cfg.RetentionDays)
+	}
+	// Address fields are used by listeners/clients as host:port verbatim;
+	// validate here so a broken config fails fast instead of at first bind.
+	// host:port only — IPv6 literals need net.JoinHostPort on the caller's
+	// side, bare hosts are invalid here.
+	for _, addr := range []struct{ name, val string }{
+		{"upstream_dns", cfg.UpstreamDNS},
+		{"dns_listen", cfg.DNSListen},
+		{"web_listen", cfg.WebListen},
+	} {
+		if _, _, err := net.SplitHostPort(addr.val); err != nil {
+			return Config{}, fmt.Errorf("%s %q: need host:port (net.JoinHostPort for IPv6 literals): %w", addr.name, addr.val, err)
+		}
 	}
 	return cfg, nil
 }
@@ -86,5 +106,6 @@ func overrides(c *Config) []override {
 			c.RetentionDays = n
 			return nil
 		}},
+		{"MONITOR_WEB_TOKEN", func(v string) error { c.WebToken = v; return nil }},
 	}
 }

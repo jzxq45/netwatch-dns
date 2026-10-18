@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strconv"
 )
 
 // EventKind values of unified log rows.
@@ -38,48 +39,114 @@ type TopRow struct {
 	Count    int
 }
 
-// newEventSQL builds the unified dns/sni reader. includeNoise controls the
-// dns-side noise filter (sni rows carry no noise flag — always included).
-func newEventSQL(includeNoise bool) string {
-	dnsWhere := ""
-	if !includeNoise {
-		dnsWhere = " WHERE COALESCE(noise, 0) = 0"
+// The unified feed readers fetch per-table top-N slices (index-backed
+// ORDER BY ts DESC LIMIT n — no full-window sorts) and merge in Go. That is
+// the "push the work to the index" layout: SQLite cannot push ORDER BY+LIMIT
+// of an outer query into the branches of a UNION ALL view — the previous
+// view-based queries sorted the whole retention window on every page render.
+
+// queryDNSEvents returns the newest dns rows, newest first.
+// where carries an optional condition with its own ? placeholders.
+func (s *Store) queryDNSEvents(ctx context.Context, where string, args []any, limit int) ([]Event, error) {
+	q := "SELECT client_ip, domain, ts, noise FROM dns_log " + where +
+		" ORDER BY ts DESC LIMIT " + strconv.Itoa(limit)
+	rows, err := s.read.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("dns events: %w", err)
 	}
-	return `
-SELECT kind, client_ip, name, ts, noise FROM (
-    SELECT ? AS kind, client_ip, domain AS name, ts, COALESCE(noise,0) AS noise
-      FROM dns_log` + dnsWhere + `
-    UNION ALL
-    SELECT ?, client_ip, sni AS name, ts, 0 AS noise FROM sni_log
-)
-`
+	defer rows.Close()
+	out := make([]Event, 0, limit)
+	for rows.Next() {
+		var e Event
+		var noise int
+		if err := rows.Scan(&e.ClientIP, &e.Name, &e.TS, &noise); err != nil {
+			return nil, fmt.Errorf("scan dns event: %w", err)
+		}
+		e.Kind = EventDNS
+		e.Noise = noise == 1
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+// querySNIEvents is queryDNSEvents over sni_log (no noise flag).
+func (s *Store) querySNIEvents(ctx context.Context, where string, args []any, limit int) ([]Event, error) {
+	q := "SELECT client_ip, sni, ts FROM sni_log " + where +
+		" ORDER BY ts DESC LIMIT " + strconv.Itoa(limit)
+	rows, err := s.read.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("sni events: %w", err)
+	}
+	defer rows.Close()
+	out := make([]Event, 0, limit)
+	for rows.Next() {
+		var e Event
+		if err := rows.Scan(&e.ClientIP, &e.Name, &e.TS); err != nil {
+			return nil, fmt.Errorf("scan sni event: %w", err)
+		}
+		e.Kind = EventSNI
+		e.Noise = false
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+// mergeEvents merges two newest-first slices into a single newest-first
+// result capped at limit (ties keep dns rows ahead — totals never drop).
+func mergeEvents(a, b []Event, limit int) []Event {
+	out := make([]Event, 0, min(limit, len(a)+len(b)))
+	i, j := 0, 0
+	for i < len(a) && j < len(b) && len(out) < limit {
+		if a[i].TS >= b[j].TS {
+			out = append(out, a[i])
+			i++
+		} else {
+			out = append(out, b[j])
+			j++
+		}
+	}
+	for i < len(a) && len(out) < limit {
+		out = append(out, a[i])
+		i++
+	}
+	for j < len(b) && len(out) < limit {
+		out = append(out, b[j])
+		j++
+	}
+	return out
 }
 
 // RecentEvents returns the newest clear (non-noise) events, newest first.
 func (s *Store) RecentEvents(ctx context.Context, limit int) ([]Event, error) {
-	q := fmt.Sprintf("%s ORDER BY ts DESC LIMIT %d", newEventSQL(false), limit) //nolint:gosec // limit is caller-bounded
-	rows, err := s.db.QueryContext(ctx, q, EventDNS, EventSNI)
+	dnsa, err := s.queryDNSEvents(ctx, "WHERE COALESCE(noise,0)=0", nil, limit)
 	if err != nil {
-		return nil, fmt.Errorf("recent events: %w", err)
+		return nil, err
 	}
-	return scanEvents(rows)
+	snie, err := s.querySNIEvents(ctx, "", nil, limit)
+	if err != nil {
+		return nil, err
+	}
+	return mergeEvents(dnsa, snie, limit), nil
 }
 
 // RecentEventsAll is RecentEvents without the noise filter (show=all view).
 func (s *Store) RecentEventsAll(ctx context.Context, limit int) ([]Event, error) {
-	q := fmt.Sprintf("%s ORDER BY ts DESC LIMIT %d", newEventSQL(true), limit) //nolint:gosec // limit is caller-bounded
-	rows, err := s.db.QueryContext(ctx, q, EventDNS, EventSNI)
+	dnsa, err := s.queryDNSEvents(ctx, "", nil, limit)
 	if err != nil {
-		return nil, fmt.Errorf("recent events all: %w", err)
+		return nil, err
 	}
-	return scanEvents(rows)
+	snie, err := s.querySNIEvents(ctx, "", nil, limit)
+	if err != nil {
+		return nil, err
+	}
+	return mergeEvents(dnsa, snie, limit), nil
 }
 
 // NoisyEventsSince counts noise-flagged dns rows at or after sinceTS —
 // the "hidden noise" counter under the clean feed.
 func (s *Store) NoisyEventsSince(ctx context.Context, sinceTS int64) (int, error) {
 	var n int
-	if err := s.db.QueryRowContext(ctx,
+	if err := s.read.QueryRowContext(ctx,
 		`SELECT count(*) FROM dns_log WHERE COALESCE(noise,0)=1 AND ts >= ?`, sinceTS).
 		Scan(&n); err != nil {
 		return 0, fmt.Errorf("noise count: %w", err)
@@ -90,33 +157,21 @@ func (s *Store) NoisyEventsSince(ctx context.Context, sinceTS int64) (int, error
 // EventsSince returns events with ts > since (unix seconds), newest first
 // (any noise flag — this feeds the JSON API for scripts).
 func (s *Store) EventsSince(ctx context.Context, since int64, limit int) ([]Event, error) {
-	q := fmt.Sprintf("%s WHERE ts > ? ORDER BY ts DESC LIMIT %d", newEventSQL(true), limit) //nolint:gosec // limit is caller-bounded
-	rows, err := s.db.QueryContext(ctx, q, EventDNS, EventSNI, since)
+	dnsa, err := s.queryDNSEvents(ctx, "WHERE ts > ?", []any{since}, limit)
 	if err != nil {
-		return nil, fmt.Errorf("events since %d: %w", since, err)
+		return nil, err
 	}
-	return scanEvents(rows)
-}
-
-func scanEvents(rows *sql.Rows) ([]Event, error) {
-	defer rows.Close()
-	var out []Event
-	for rows.Next() {
-		var e Event
-		var noise int
-		if err := rows.Scan(&e.Kind, &e.ClientIP, &e.Name, &e.TS, &noise); err != nil {
-			return nil, fmt.Errorf("scan event: %w", err)
-		}
-		e.Noise = noise == 1
-		out = append(out, e)
+	snie, err := s.querySNIEvents(ctx, "WHERE ts > ?", []any{since}, limit)
+	if err != nil {
+		return nil, err
 	}
-	return out, rows.Err()
+	return mergeEvents(dnsa, snie, limit), nil
 }
 
 // DeviceByIP returns one device row or nil when unknown.
 func (s *Store) DeviceByIP(ctx context.Context, ip string) (*DeviceRow, error) {
 	var d DeviceRow
-	err := s.db.QueryRowContext(ctx,
+	err := s.read.QueryRowContext(ctx,
 		`SELECT ip, COALESCE(mac,''), COALESCE(hostname,''), last_seen FROM devices WHERE ip = ?`, ip).
 		Scan(&d.IP, &d.MAC, &d.Hostname, &d.LastSeen)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -130,17 +185,20 @@ func (s *Store) DeviceByIP(ctx context.Context, ip string) (*DeviceRow, error) {
 
 // DeviceEvents returns one device's log rows (any noise flag), newest first.
 func (s *Store) DeviceEvents(ctx context.Context, ip string, limit int) ([]Event, error) {
-	q := fmt.Sprintf("%s WHERE client_ip = ? ORDER BY ts DESC LIMIT %d", newEventSQL(true), limit) //nolint:gosec // limit is caller-bounded
-	rows, err := s.db.QueryContext(ctx, q, EventDNS, EventSNI, ip)
+	dnsa, err := s.queryDNSEvents(ctx, "WHERE client_ip = ?", []any{ip}, limit)
 	if err != nil {
-		return nil, fmt.Errorf("device events %s: %w", ip, err)
+		return nil, err
 	}
-	return scanEvents(rows)
+	snie, err := s.querySNIEvents(ctx, "WHERE client_ip = ?", []any{ip}, limit)
+	if err != nil {
+		return nil, err
+	}
+	return mergeEvents(dnsa, snie, limit), nil
 }
 
 // ListDevices returns the device table ordered by last_seen desc.
 func (s *Store) ListDevices(ctx context.Context) ([]DeviceRow, error) {
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.read.QueryContext(ctx,
 		`SELECT ip, COALESCE(mac,''), COALESCE(hostname,''), last_seen
 		 FROM devices ORDER BY last_seen DESC`)
 	if err != nil {
@@ -168,12 +226,12 @@ FROM (
     GROUP BY client_ip, domain
 ) t JOIN devices d ON d.ip = t.client_ip
 ORDER BY d.ip, cnt DESC LIMIT ?`
-	rows, err := s.db.QueryContext(ctx, q, sinceTS, limit)
+	rows, err := s.read.QueryContext(ctx, q, sinceTS, limit)
 	if err != nil {
 		return nil, fmt.Errorf("top domains: %w", err)
 	}
 	defer rows.Close()
-	var out []TopRow
+	out := make([]TopRow, 0, limit)
 	for rows.Next() {
 		var r TopRow
 		if err := rows.Scan(&r.DeviceIP, &r.Hostname, &r.Domain, &r.Count); err != nil {

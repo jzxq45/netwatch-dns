@@ -36,7 +36,7 @@ func TestNoiseColumnMigration(t *testing.T) {
 	}
 	defer s.Close()
 
-	rows, err := s.db.Query(`PRAGMA table_info(dns_log)`)
+	rows, err := s.write.Query(`PRAGMA table_info(dns_log)`)
 	if err != nil {
 		t.Fatalf("table_info: %v", err)
 	}
@@ -61,7 +61,7 @@ func TestNoiseColumnMigration(t *testing.T) {
 	}
 
 	var n int
-	if err := s.db.QueryRow(`SELECT count(*) FROM dns_log WHERE COALESCE(noise,0)=0 AND domain='old.site.'`).Scan(&n); err != nil {
+	if err := s.write.QueryRow(`SELECT count(*) FROM dns_log WHERE COALESCE(noise,0)=0 AND domain='old.site.'`).Scan(&n); err != nil {
 		t.Fatalf("legacy row query: %v", err)
 	}
 	if n != 1 {

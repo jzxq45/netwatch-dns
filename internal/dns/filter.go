@@ -6,6 +6,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"monitor/internal/metrics"
 )
 
 // stripSuffixes removes a known LAN search suffix (e.g. "IGD_Rostelecom")
@@ -19,10 +21,11 @@ func stripSuffixes(name string, suffixes []string) string {
 	n := strings.TrimSuffix(name, ".")
 	low := strings.ToLower(n)
 	// Prefer the longest matching suffix so "a.bar.Sfx." with suffixes
-	// ["Sfx", "bar.Sfx"] collapses to "a." rather than "a.bar..".
+	// ["Sfx", "bar.Sfx"] collapses to "a." rather than "a.bar..". The dot
+	// boundary is enforced: "foo" must not match inside "afoo".
 	best := ""
 	for _, sfx := range suffixes {
-		if strings.HasSuffix(low, sfx) && len(sfx) > len(best) && len(n) > len(sfx) {
+		if (low == sfx || strings.HasSuffix(low, "."+sfx)) && len(sfx) > len(best) && len(n) > len(sfx) {
 			best = sfx
 		}
 	}
@@ -61,6 +64,10 @@ type blockAggregator struct {
 	counts map[string]int // client+"\x00"+domain -> hits in current window
 }
 
+// aggrMaxKeys caps the window map: an attacker flooding unique
+// (client, domain) pairs must not grow unbounded memory between flushes.
+const aggrMaxKeys = 16384
+
 func newBlockAggregator(level slog.Level, log *slog.Logger) *blockAggregator {
 	return &blockAggregator{log: log, level: level, counts: make(map[string]int)}
 }
@@ -70,7 +77,12 @@ func (a *blockAggregator) add(client, domain string) {
 		return // counting would be wasted work: nothing is ever emitted
 	}
 	a.mu.Lock()
-	a.counts[client+"\x00"+domain]++
+	k := client + "\x00" + domain
+	if a.counts[k] > 0 || len(a.counts) < aggrMaxKeys {
+		a.counts[k]++
+	} else {
+		metrics.BlockAggrCapTotal.Add(1) // cap hit: data plane stays alive, log stays bounded
+	}
 	a.mu.Unlock()
 }
 

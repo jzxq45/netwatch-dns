@@ -116,7 +116,7 @@ func TestSkipPTR(t *testing.T) {
 	if testing.Short() {
 		t.Skip("network bind test")
 	}
-	addr, db := startBlockTestServer(t, func(s *Server) { s.SkipPTR = true })
+	addr, db := startBlockTestServer(t, func(c *Config) { c.SkipPTR = true })
 
 	c := &dns.Client{Timeout: 3 * time.Second}
 	m := new(dns.Msg)
@@ -152,8 +152,8 @@ func TestSearchSuffixLoggedClean(t *testing.T) {
 	if testing.Short() {
 		t.Skip("network bind test")
 	}
-	addr, db := startBlockTestServer(t, func(s *Server) {
-		s.SearchSuffixes = []string{"IGD_Rostelecom"}
+	addr, db := startBlockTestServer(t, func(c *Config) {
+		c.SearchSuffixes = []string{"IGD_Rostelecom"}
 	})
 
 	c := &dns.Client{Timeout: 3 * time.Second}

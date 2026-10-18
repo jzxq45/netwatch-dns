@@ -33,6 +33,31 @@ func TestClientIP(t *testing.T) {
 	}
 }
 
+// TestTrustedClient pins the open-resolver ACL: LAN-side sources only.
+// netip.ParseAddr (not net.ParseIP) is load-bearing for v6 zones.
+func TestTrustedClient(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		host  string
+		trust bool
+	}{
+		{"127.0.0.1", true},
+		{"192.168.1.5", true},
+		{"10.0.0.77", true},
+		{"fe80::1%eth0", true}, // v6 link-local with zone
+		{"fd00::1", true},      // ULA
+		{"8.8.8.8", false},
+		{"239.255.255.250", false},
+		{"", false},
+		{"weird", false},
+	}
+	for _, tt := range tests {
+		if got := trustedClient(tt.host); got != tt.trust {
+			t.Errorf("trustedClient(%q) = %v, want %v", tt.host, got, tt.trust)
+		}
+	}
+}
+
 func addrFor(s string) net.Addr {
 	if a, err := net.ResolveUDPAddr("udp", s); err == nil {
 		return a
@@ -119,7 +144,7 @@ func TestServerLogsQuery(t *testing.T) {
 		t.Fatalf("probe close: %v", err)
 	}
 
-	srv := New(up, db.DB(), nil)
+	srv := New(Config{Upstream: up}, db.DB(), nil)
 	serveErr := make(chan error, 1)
 	sctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(func() {

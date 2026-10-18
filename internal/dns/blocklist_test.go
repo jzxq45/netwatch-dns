@@ -61,7 +61,7 @@ func (c *capNames) has(name string) bool {
 	return len(c.names) > 0 && c.names[len(c.names)-1] == name
 }
 
-func startBlockTestServer(t *testing.T, setup func(*Server)) (addr string, db *store.Store) {
+func startBlockTestServer(t *testing.T, echo func(*Config)) (addr string, db *store.Store) {
 	t.Helper()
 	var cap capNames
 	up := startUpstream(t, captureUpstream(&cap))
@@ -79,11 +79,11 @@ func startBlockTestServer(t *testing.T, setup func(*Server)) (addr string, db *s
 	addr = l.Addr().String()
 	_ = l.Close()
 
-	srv := New(up, db.DB(), nil)
-	if setup != nil {
-		setup(srv)
+	cfg := Config{Upstream: up}
+	if echo != nil {
+		echo(&cfg)
 	}
-
+	srv := New(cfg, db.DB(), nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	serveErr := make(chan error, 1)
@@ -117,9 +117,7 @@ func TestDoHBlockedLogEmitted(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
 	// Default blocklist (Blocklist stays nil), short window for fast flush.
-	srv := New(up, db.DB(), log)
-	srv.DoHWindow = "50ms"
-	srv.DoHLogLevel = "debug"
+	srv := New(Config{Upstream: up, DoHWindow: "50ms", DoHLogLevel: "debug"}, db.DB(), log)
 
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -232,8 +230,8 @@ func TestDoHBlocklist(t *testing.T) {
 
 func TestDoHBlocklistOverride(t *testing.T) {
 	t.Parallel()
-	addr, _ := startBlockTestServer(t, func(s *Server) {
-		s.Blocklist = []string{"blocked.example", "other.blocked.example"}
+	addr, _ := startBlockTestServer(t, func(c *Config) {
+		c.Blocklist = []string{"blocked.example", "other.blocked.example"}
 	})
 
 	tests := []struct {

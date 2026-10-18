@@ -12,37 +12,61 @@ import (
 //go:embed schema.sql
 var schemaSQL string
 
-// Store wraps the SQLite handle. Writes are serialized on one conn because
-// modernc.org/sqlite (pure Go) has no shared cache; WAL keeps readers live.
+// Store owns the SQLite handles. SQLite WAL allows many concurrent readers;
+// only writes conflict, so the writer is a dedicated single-connection pool
+// and readers go through an independent read-only pool. Sharing one
+// connection for both would make any UI query monopolize the data-plane
+// writer (head-of-line blocking).
 type Store struct {
-	db *sql.DB
+	write *sql.DB // single conn: serialized writes (sink batches, upserts, retention)
+	read  *sql.DB // read-only pool for UI/API queries
 }
 
 func Open(path string) (*Store, error) {
-	dsn := "file:" + path +
+	wdsn := "file:" + path +
 		"?_pragma=journal_mode(WAL)" +
 		"&_pragma=busy_timeout(5000)" +
 		"&_pragma=synchronous(NORMAL)"
-	db, err := sql.Open("sqlite", dsn)
+	rdsn := "file:" + path +
+		"?_pragma=busy_timeout(2000)" +
+		"&_pragma=query_only(1)"
+
+	write, err := sql.Open("sqlite", wdsn)
 	if err != nil {
 		return nil, fmt.Errorf("open db: %w", err)
 	}
-	db.SetMaxOpenConns(1)
-	if _, err := db.Exec(schemaSQL); err != nil {
-		db.Close()
+	write.SetMaxOpenConns(1) // writes must stay serialized (see Store doc)
+
+	read, err := sql.Open("sqlite", rdsn)
+	if err != nil {
+		write.Close()
+		return nil, fmt.Errorf("open db read pool: %w", err)
+	}
+	read.SetMaxOpenConns(4)
+	read.SetMaxIdleConns(4)
+
+	if _, err := write.Exec(schemaSQL); err != nil {
+		write.Close()
+		read.Close()
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
-	if err := ensureNoiseColumn(db); err != nil {
-		db.Close()
+	if err := ensureNoiseColumn(write); err != nil {
+		write.Close()
+		read.Close()
 		return nil, fmt.Errorf("migrate noise: %w", err)
 	}
-	return &Store{db: db}, nil
+	if err := read.PingContext(context.Background()); err != nil {
+		write.Close()
+		read.Close()
+		return nil, fmt.Errorf("read pool ping: %w", err)
+	}
+	return &Store{write: write, read: read}, nil
 }
 
 // ensureNoiseColumn adds dns_log.noise to databases created before the
 // noise-filtering feature. Idempotent: no-op when the column exists.
-func ensureNoiseColumn(db *sql.DB) error {
-	rows, err := db.Query(`PRAGMA table_info(dns_log)`)
+func ensureNoiseColumn(write *sql.DB) error {
+	rows, err := write.Query(`PRAGMA table_info(dns_log)`)
 	if err != nil {
 		return fmt.Errorf("table_info: %w", err)
 	}
@@ -62,17 +86,24 @@ func ensureNoiseColumn(db *sql.DB) error {
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("iterate table_info: %w", err)
 	}
-	if _, err := db.Exec(`ALTER TABLE dns_log ADD COLUMN noise INTEGER NOT NULL DEFAULT 0`); err != nil {
+	if _, err := write.Exec(`ALTER TABLE dns_log ADD COLUMN noise INTEGER NOT NULL DEFAULT 0`); err != nil {
 		return fmt.Errorf("add noise column: %w", err)
 	}
 	return nil
 }
 
-func (s *Store) DB() *sql.DB { return s.db }
+// DB returns the single writer handle. Reserved for the async sink and a few
+// raw maintenance paths (tests); use the read methods for queries — never
+// funnel read load through here or it starves the data plane.
+func (s *Store) DB() *sql.DB { return s.write }
 
 func (s *Store) Close() error {
-	if err := s.db.Close(); err != nil {
+	readErr := s.read.Close()
+	if err := s.write.Close(); err != nil {
 		return fmt.Errorf("close db: %w", err)
+	}
+	if readErr != nil {
+		return fmt.Errorf("close db read pool: %w", readErr)
 	}
 	return nil
 }
@@ -86,7 +117,7 @@ func (s *Store) UpsertDevice(ctx context.Context, ip string, mac, hostname *stri
 	          mac      = COALESCE(excluded.mac, devices.mac),
 	          hostname = COALESCE(excluded.hostname, devices.hostname),
 	          last_seen = excluded.last_seen`
-	if _, err := s.db.ExecContext(ctx, q, ip, mac, hostname, lastSeen); err != nil {
+	if _, err := s.write.ExecContext(ctx, q, ip, mac, hostname, lastSeen); err != nil {
 		return fmt.Errorf("upsert device %s: %w", ip, err)
 	}
 	return nil
@@ -95,15 +126,34 @@ func (s *Store) UpsertDevice(ctx context.Context, ip string, mac, hostname *stri
 // RetentionTables whitelists targets for DeleteOld to keep caller input out of SQL.
 var RetentionTables = map[string]bool{"dns_log": true, "sni_log": true, "flow_log": true}
 
-// DeleteOld removes rows older than cutoff (unix seconds). Returns rows deleted.
-func (s *Store) DeleteOld(table string, cutoff int64) (int64, error) {
+// deleteChunk caps the per-transaction DELETE so a big backlog (first sweep
+// after downtime) never monopolizes the single writer connection for minutes.
+const deleteChunk = 1000
+
+// DeleteOld removes rows older than cutoff (unix seconds) in bounded chunks,
+// cancelling between chunks via ctx. Returns rows deleted.
+func (s *Store) DeleteOld(ctx context.Context, table string, cutoff int64) (int64, error) {
 	if !RetentionTables[table] {
 		return 0, fmt.Errorf("unknown table %q", table)
 	}
-	q := fmt.Sprintf("DELETE FROM %s WHERE ts < ?", table) //nolint:gosec // table is whitelisted
-	res, err := s.db.Exec(q, cutoff)
-	if err != nil {
-		return 0, fmt.Errorf("retain %s: %w", table, err)
+	q := fmt.Sprintf(
+		"DELETE FROM %s WHERE rowid IN (SELECT rowid FROM %s WHERE ts < ? LIMIT ?)", table, table) //nolint:gosec // table is whitelisted
+	var total int64
+	for {
+		res, err := s.write.ExecContext(ctx, q, cutoff, deleteChunk)
+		if err != nil {
+			return total, fmt.Errorf("retain %s: %w", table, err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return total, fmt.Errorf("retain %s rows affected: %w", table, err)
+		}
+		total += n
+		if n < deleteChunk {
+			return total, nil
+		}
+		if err := ctx.Err(); err != nil {
+			return total, err
+		}
 	}
-	return res.RowsAffected()
 }
