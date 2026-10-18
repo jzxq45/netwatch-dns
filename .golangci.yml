@@ -1,0 +1,12 @@
+version: "2"
+
+linters:
+  # Explicit opt-in set (was: --disable-all -E govet,errcheck,ineffassign,gofmt).
+  # Note: govet here runs the default checker set; heavy sub-analyzers like
+  # fieldalignment are NOT enabled by default, so nothing extra to mute.
+  default: none
+  enable:
+    - govet
+    - errcheck
+    - ineffassign
+    - gofmt

@@ -4,7 +4,7 @@
 > resolves — with no client-side install on phones or laptops.
 
 [![CI](https://github.com/jzxq45/netwatch-dns/actions/workflows/ci.yml/badge.svg)](https://github.com/jzxq45/netwatch-dns/actions/workflows/ci.yml)
-[![Go version](https://img.shields.io/badge/go-1.23%2B-00ADD8?logo=go)](https://go.dev/)
+[![Go version](https://img.shields.io/badge/go-1.26%2B-00ADD8?logo=go)](https://go.dev/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Android APK](https://img.shields.io/badge/Android-APK-3DDC84?logo=android)](android/README.md)
 
