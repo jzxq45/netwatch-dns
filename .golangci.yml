@@ -10,8 +10,8 @@ linters:
     - errcheck
     - ineffassign
 
-# In golangci-lint v2 gofmt is a formatter and lives in its own section.
+# In golangci-lint v2 gofmt is a formatter and lives in its own section
+# (no `default` key here — the schema only allows it under `linters`).
 formatters:
-  default: none
   enable:
     - gofmt

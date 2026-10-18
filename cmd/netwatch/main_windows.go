@@ -94,7 +94,7 @@ func run() int {
 				return 1
 			}
 		case <-ctx.Done():
-			<-appErr
+			_ = <-appErr // shutting down anyway; the error no longer matters
 		}
 		return 0
 	}
@@ -104,7 +104,7 @@ func run() int {
 	// must not leave a dead window on screen: terminate it immediately.
 	go func() {
 		select {
-		case <-appErr:
+		case _ = <-appErr:
 			w.Terminate()
 		case <-ctx.Done():
 		}
@@ -135,7 +135,7 @@ func waitWebUp(webURL string, d time.Duration, appErr <-chan error) error {
 	for {
 		resp, err := hc.Get(addr)
 		if err == nil {
-			resp.Body.Close()
+			_ = resp.Body.Close() // health probe body is tiny/empty
 			if resp.StatusCode == http.StatusOK {
 				return nil
 			}
@@ -214,5 +214,5 @@ func alert(title, msg string) {
 	tp, _ := syscall.UTF16PtrFromString(title)
 	mp, _ := syscall.UTF16PtrFromString(msg)
 	//nolint:dogsled // winapi calling convention
-	mb.Call(0, uintptr(unsafe.Pointer(mp)), uintptr(unsafe.Pointer(tp)), 0x10) // MB_ICONERROR
+	_, _, _ = mb.Call(0, uintptr(unsafe.Pointer(mp)), uintptr(unsafe.Pointer(tp)), 0x10) // MB_ICONERROR
 }

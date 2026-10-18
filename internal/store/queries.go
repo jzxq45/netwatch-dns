@@ -54,7 +54,7 @@ func (s *Store) queryDNSEvents(ctx context.Context, where string, args []any, li
 	if err != nil {
 		return nil, fmt.Errorf("dns events: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	out := make([]Event, 0, limit)
 	for rows.Next() {
 		var e Event
@@ -77,7 +77,7 @@ func (s *Store) querySNIEvents(ctx context.Context, where string, args []any, li
 	if err != nil {
 		return nil, fmt.Errorf("sni events: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	out := make([]Event, 0, limit)
 	for rows.Next() {
 		var e Event
@@ -204,7 +204,7 @@ func (s *Store) ListDevices(ctx context.Context) ([]DeviceRow, error) {
 	if err != nil {
 		return nil, fmt.Errorf("list devices: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []DeviceRow
 	for rows.Next() {
 		var d DeviceRow
@@ -230,7 +230,7 @@ ORDER BY d.ip, cnt DESC LIMIT ?`
 	if err != nil {
 		return nil, fmt.Errorf("top domains: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	out := make([]TopRow, 0, limit)
 	for rows.Next() {
 		var r TopRow

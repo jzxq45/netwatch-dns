@@ -34,13 +34,13 @@ func TestNoiseColumnMigration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open migrated: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	rows, err := s.write.Query(`PRAGMA table_info(dns_log)`)
 	if err != nil {
 		t.Fatalf("table_info: %v", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	found := false
 	for rows.Next() {
 		var cid, notNull, pk int

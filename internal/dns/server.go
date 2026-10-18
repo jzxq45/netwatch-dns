@@ -219,10 +219,13 @@ func (s *Server) Start(ctx context.Context, addr string) error {
 		}
 	})
 	err := eg.Wait()
-	cancel()   // sink exits via sctx.Done
-	<-sinkDone // drain+flush finished — safe for caller to close the DB
+	cancel()              // sink exits via sctx.Done
+	sinkErr := <-sinkDone // drain+flush finished — safe for caller to close the DB
 	if err != nil && !errors.Is(err, context.Canceled) {
 		return fmt.Errorf("dns serve %s: %w", addr, err)
+	}
+	if sinkErr != nil && !errors.Is(sinkErr, context.Canceled) {
+		return fmt.Errorf("sink: %w", sinkErr)
 	}
 	return nil
 }

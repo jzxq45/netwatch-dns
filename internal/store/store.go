@@ -39,25 +39,25 @@ func Open(path string) (*Store, error) {
 
 	read, err := sql.Open("sqlite", rdsn)
 	if err != nil {
-		write.Close()
+		_ = write.Close()
 		return nil, fmt.Errorf("open db read pool: %w", err)
 	}
 	read.SetMaxOpenConns(4)
 	read.SetMaxIdleConns(4)
 
 	if _, err := write.Exec(schemaSQL); err != nil {
-		write.Close()
-		read.Close()
+		_ = write.Close()
+		_ = read.Close()
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
 	if err := ensureNoiseColumn(write); err != nil {
-		write.Close()
-		read.Close()
+		_ = write.Close()
+		_ = read.Close()
 		return nil, fmt.Errorf("migrate noise: %w", err)
 	}
 	if err := read.PingContext(context.Background()); err != nil {
-		write.Close()
-		read.Close()
+		_ = write.Close()
+		_ = read.Close()
 		return nil, fmt.Errorf("read pool ping: %w", err)
 	}
 	return &Store{write: write, read: read}, nil
@@ -70,7 +70,7 @@ func ensureNoiseColumn(write *sql.DB) error {
 	if err != nil {
 		return fmt.Errorf("table_info: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	for rows.Next() {
 		var cid int
 		var name, typ string
