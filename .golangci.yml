@@ -9,4 +9,9 @@ linters:
     - govet
     - errcheck
     - ineffassign
+
+# In golangci-lint v2 gofmt is a formatter and lives in its own section.
+formatters:
+  default: none
+  enable:
     - gofmt
