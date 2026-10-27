@@ -36,6 +36,15 @@
   (DoH) upstream, thundering-herd protection (singleflight collapse of
   identical in-flight queries), and automatic fallback to a LAN IP if port
   53 is taken by the OS.
+- **Bailiwick verification**: responses from upstreams are checked against
+  the zone they were asked from (RFC 2181 / RFC 5452), protecting the cache
+  from poisoning; NXDOMAIN answers are cached with SOA-based negative TTLs
+  (RFC 2308 negative caching).
+- **Primary + Fallback upstream resolver**: queries go to the primary
+  resolver with automatic failover to a fallback and a circuit breaker
+  that skips a failing upstream until it recovers.
+- **Tuned SQLite storage**: WAL journaling mode with a memory page cache
+  for fast, low-contention writes.
 - Web UI (server-rendered, no build step): a live feed, a device list with a
   per-device query log, per-device top domains for any time window, a 24h
   activity graph, history export to CSV and JSON (`/api/export`), and a
@@ -152,12 +161,36 @@ On Linux check `resolv.conf` / `systemd-resolved` and `ss -lunp :53`.
 If freeing the port is not desirable, just move the listener:
 `dns_listen: 0.0.0.0:5300` plus a router DNS-forwarding rule.
 
-### 3. Reserve a static IP for the monitor host
+### 3. Docker / Docker Compose
+
+Run without building anything on the host:
+
+```bash
+# Docker Compose
+docker compose up -d
+```
+
+The compose file mounts `./data:/data` for persistent SQLite storage (the DB
+survives container restarts and upgrades) and exposes port **53 (UDP/TCP)**
+for DNS queries and **8080 (TCP)** for the web UI:
+
+```yaml
+ports:
+  - "53:53/udp"
+  - "53:53/tcp"
+  - "8080:8080"
+volumes:
+  - ./data:/data
+```
+
+Then point your router's DHCP DNS at the Docker host IP.
+
+### 4. Reserve a static IP for the monitor host
 
 Router → DHCP settings → bind the host MAC to a fixed lease
 (e.g. `192.168.1.5`) or set a static IP on the host itself.
 
-### 4. Run monitor
+### 5. Run monitor
 
 ```
 .\netwatch.exe         # desktop window with the UI; closing it stops everything cleanly
@@ -167,7 +200,7 @@ Router → DHCP settings → bind the host MAC to a fixed lease
 Output (console build): `msg=started db=… dns=0.0.0.0:53 upstream=1.1.1.1:53 web=127.0.0.1:8080`.
 The GUI build writes the same lines to `netwatch.log` next to the binary.
 
-### 5. Verify locally
+### 6. Verify locally
 
 ```
 nslookup example.com 127.0.0.1     # Windows
@@ -175,17 +208,17 @@ dig @127.0.0.1 example.com         # Linux
 ```
 Expect an answer and a `dns query` line in the console.
 
-### 6. Configure the router
+### 7. Configure the router
 
 - DHCP → DNS server = monitor host IP (e.g. `192.168.1.5`).
 - Optional: block outbound DoT (:853) so clients cannot bypass the resolver —
   see [docs/ROUTER-SETUP.md](docs/ROUTER-SETUP.md).
 
-### 7. Reconnect a client device
+### 8. Reconnect a client device
 
 Toggle Wi-Fi off/on (or reboot the phone) so it picks the new DNS via DHCP.
 
-### 8. Open the web UI
+### 9. Open the web UI
 
 `http://<monitor-ip>:8080` from any browser. On the phone: Add to Home Screen
 (see [docs/MOBILE.md](docs/MOBILE.md)) or install the
