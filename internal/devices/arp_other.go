@@ -29,4 +29,3 @@ func LookupMAC(ipStr string) (string, error) {
 	}
 	return "", fmt.Errorf("ip %s not found in arp cache", ipStr)
 }
-
