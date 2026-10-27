@@ -1,0 +1,18 @@
+services:
+  netwatch:
+    build: .
+    image: netwatch:latest
+    container_name: netwatch
+    restart: unless-stopped
+    ports:
+      - "53:53/udp"
+      - "53:53/tcp"
+      - "8080:8080/tcp"
+    environment:
+      - MONITOR_UPSTREAM_DNS=1.1.1.1:53
+      - MONITOR_FALLBACK_UPSTREAM=1.0.0.1:53
+      - MONITOR_DNS_LISTEN=0.0.0.0:53
+      - MONITOR_WEB_LISTEN=0.0.0.0:8080
+      - MONITOR_DB_PATH=/data/monitor.db
+    volumes:
+      - ./data:/data

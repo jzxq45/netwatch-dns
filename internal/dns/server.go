@@ -77,6 +77,7 @@ type Record struct {
 // contract nobody could enforce).
 type Config struct {
 	Upstream              string   // host:port of the upstream resolver
+	FallbackUpstream      string   // used when the primary upstream fails; empty disables
 	SkipPTR               bool     // answer empty NOERROR for PTR in-addr.arpa; no log/upstream
 	Blocklist             []string // non-nil replaces defaultDoHBlocklist
 	BlocklistFiles        []string // hosts/adblock files merged into the blocklist
@@ -90,9 +91,10 @@ type Config struct {
 
 // Server forwards queries to upstream and records them asynchronously.
 type Server struct {
-	upstream string
-	log      *slog.Logger
-	snk      *store.Sink
+	upstream         string
+	fallbackUpstream string
+	log              *slog.Logger
+	snk              *store.Sink
 
 	// OnRecord, when set, is called for every accepted query (devices feed).
 	// Must be set before Start; invoked synchronously on the serve path.
@@ -120,6 +122,11 @@ type Server struct {
 	// inflight bounds concurrent handlers (admission control; DNSInflight is
 	// the observable mirror).
 	inflight atomic.Int64
+
+	// consecutiveFails is a featherweight circuit breaker signal: how many
+	// primary upstream exchanges failed in a row (observable via metrics/
+	// tests; reset to 0 on any successful exchange, primary or fallback).
+	consecutiveFails atomic.Int32
 }
 
 func New(cfg Config, db *sql.DB, log *slog.Logger) *Server {
@@ -160,23 +167,24 @@ func New(cfg Config, db *sql.DB, log *slog.Logger) *Server {
 		refreshEvery = time.Duration(cfg.BlocklistRefreshHours) * time.Hour
 	}
 	return &Server{
-		upstream:      cfg.Upstream,
-		log:           log,
-		snk:           store.NewSink(db, log, ""),
-		skipPTR:       cfg.SkipPTR,
-		blocklist:     normalizedBlocklist,
-		blockMatcher:  blockMatcher,
-		blocklistURLs: cfg.BlocklistURLs,
-		refreshEvery:  refreshEvery,
-		noiselist:     normalizeEntries(noiselist),
-		dohLevel:      dohLevel(cfg.DoHLogLevel),
-		window:        parseWindow(cfg.DoHWindow, 10*time.Second, log),
-		suffixes:      normalizeEntries(cfg.SearchSuffixes),
-		aggr:          newBlockAggregator(dohLevel(cfg.DoHLogLevel), log),
-		udpClient:     &dns.Client{Timeout: upstreamTO, Net: "udp"},
-		tcpClient:     &dns.Client{Timeout: upstreamTO, Net: "tcp"},
-		dohClient:     &http.Client{Timeout: upstreamTO},
-		cache:         newDNSCache(10000),
+		upstream:         cfg.Upstream,
+		fallbackUpstream: cfg.FallbackUpstream,
+		log:              log,
+		snk:              store.NewSink(db, log, ""),
+		skipPTR:          cfg.SkipPTR,
+		blocklist:        normalizedBlocklist,
+		blockMatcher:     blockMatcher,
+		blocklistURLs:    cfg.BlocklistURLs,
+		refreshEvery:     refreshEvery,
+		noiselist:        normalizeEntries(noiselist),
+		dohLevel:         dohLevel(cfg.DoHLogLevel),
+		window:           parseWindow(cfg.DoHWindow, 10*time.Second, log),
+		suffixes:         normalizeEntries(cfg.SearchSuffixes),
+		aggr:             newBlockAggregator(dohLevel(cfg.DoHLogLevel), log),
+		udpClient:        &dns.Client{Timeout: upstreamTO, Net: "udp"},
+		tcpClient:        &dns.Client{Timeout: upstreamTO, Net: "tcp"},
+		dohClient:        &http.Client{Timeout: upstreamTO},
+		cache:            newDNSCache(10000),
 	}
 }
 
@@ -562,14 +570,36 @@ func (s *Server) resolveUpstream(q dns.Question) (*dns.Msg, error) {
 	msg.SetQuestion(q.Name, q.Qtype)
 	msg.RecursionDesired = true
 
-	if strings.HasPrefix(s.upstream, "https://") || strings.HasPrefix(s.upstream, "http://") {
-		return s.exchangeDoH(msg)
+	resp, err := s.tryUpstream(msg, s.upstream)
+	if err != nil {
+		if s.fallbackUpstream != "" && s.fallbackUpstream != s.upstream {
+			s.log.Warn("primary upstream failed, trying fallback",
+				"upstream", s.upstream, "fallback", s.fallbackUpstream, "err", err)
+			s.consecutiveFails.Add(1)
+			resp, err = s.tryUpstream(msg, s.fallbackUpstream)
+			if err != nil {
+				return nil, err
+			}
+			s.consecutiveFails.Store(0)
+			return resp, nil
+		}
+		return nil, err
+	}
+	s.consecutiveFails.Store(0)
+	return resp, nil
+}
+
+// tryUpstream exchanges one query against addr (DoH endpoint or host:port
+// UDP with TCP retry on truncation/error).
+func (s *Server) tryUpstream(msg *dns.Msg, addr string) (*dns.Msg, error) {
+	if strings.HasPrefix(addr, "https://") || strings.HasPrefix(addr, "http://") {
+		return s.exchangeDoH(msg, addr)
 	}
 
 	// UDP with TCP fallback
-	resp, _, err := s.udpClient.Exchange(msg, s.upstream)
+	resp, _, err := s.udpClient.Exchange(msg, addr)
 	if err != nil || (resp != nil && resp.Truncated) {
-		resp, _, err = s.tcpClient.Exchange(msg, s.upstream)
+		resp, _, err = s.tcpClient.Exchange(msg, addr)
 	}
 	if err != nil {
 		return nil, err
@@ -580,12 +610,12 @@ func (s *Server) resolveUpstream(q dns.Question) (*dns.Msg, error) {
 	return resp, nil
 }
 
-func (s *Server) exchangeDoH(msg *dns.Msg) (*dns.Msg, error) {
+func (s *Server) exchangeDoH(msg *dns.Msg, url string) (*dns.Msg, error) {
 	wire, err := msg.Pack()
 	if err != nil {
 		return nil, fmt.Errorf("pack doh query: %w", err)
 	}
-	req, err := http.NewRequest(http.MethodPost, s.upstream, bytes.NewReader(wire))
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(wire))
 	if err != nil {
 		return nil, fmt.Errorf("create doh req: %w", err)
 	}

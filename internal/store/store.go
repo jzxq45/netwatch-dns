@@ -27,10 +27,14 @@ func Open(path string) (*Store, error) {
 	wdsn := "file:" + path +
 		"?_pragma=journal_mode(WAL)" +
 		"&_pragma=busy_timeout(5000)" +
-		"&_pragma=synchronous(NORMAL)"
+		"&_pragma=synchronous(NORMAL)" +
+		"&_pragma=cache_size(-64000)" + // 64MB page cache per connection
+		"&_pragma=temp_store(MEMORY)"
 	rdsn := "file:" + path +
 		"?_pragma=busy_timeout(2000)" +
-		"&_pragma=query_only(1)"
+		"&_pragma=query_only(1)" +
+		"&_pragma=cache_size(-64000)" +
+		"&_pragma=temp_store(MEMORY)"
 
 	write, err := sql.Open("sqlite", wdsn)
 	if err != nil {

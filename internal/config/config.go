@@ -7,16 +7,18 @@ import (
 	"net"
 	"os"
 	"strconv"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
 
 type Config struct {
-	Interface             string   `yaml:"interface"`    // LAN iface for SNI capture / device resolver
-	UpstreamDNS           string   `yaml:"upstream_dns"` // resolver PC forwards queries to
-	DNSListen             string   `yaml:"dns_listen"`   // UDP+TCP listener for the DNS server
-	WebListen             string   `yaml:"web_listen"`   // web UI / health endpoint
-	DBPath                string   `yaml:"db_path"`      // SQLite file
+	Interface             string   `yaml:"interface"`                   // LAN iface for SNI capture / device resolver
+	UpstreamDNS           string   `yaml:"upstream_dns"`                // resolver PC forwards queries to
+	FallbackUpstream      string   `yaml:"fallback_upstream,omitempty"` // used when the primary upstream fails
+	DNSListen             string   `yaml:"dns_listen"`                  // UDP+TCP listener for the DNS server
+	WebListen             string   `yaml:"web_listen"`                  // web UI / health endpoint
+	DBPath                string   `yaml:"db_path"`                     // SQLite file
 	RetentionDays         int      `yaml:"retention_days"`
 	DoHBlocklist          []string `yaml:"doh_blocklist"`                     // replaces built-in list when set
 	BlocklistFiles        []string `yaml:"blocklist_files,omitempty"`         // extra hosts/adblock files
@@ -32,6 +34,7 @@ type Config struct {
 
 const (
 	defaultUpstreamDNS   = "1.1.1.1:53"
+	defaultFallbackDNS   = "1.0.0.1:53"
 	defaultDNSListen     = "0.0.0.0:53"
 	defaultWebListen     = "127.0.0.1:8080"
 	defaultDBPath        = "monitor.db"
@@ -43,14 +46,15 @@ const (
 // overrides each field from MONITOR_* env vars.
 func Load(path string) (Config, error) {
 	cfg := Config{
-		UpstreamDNS:   defaultUpstreamDNS,
-		DNSListen:     defaultDNSListen,
-		WebListen:     defaultWebListen,
-		DBPath:        defaultDBPath,
-		RetentionDays: defaultRetention,
-		SkipPTR:       true,    // router/OS PTR noise is swallowed by default
-		DoHLogLevel:   "debug", // aggregated blocks stay out of Info output
-		DoHWindow:     "10s",   // aggregation window for dns_blocked_doh
+		UpstreamDNS:      defaultUpstreamDNS,
+		FallbackUpstream: defaultFallbackDNS,
+		DNSListen:        defaultDNSListen,
+		WebListen:        defaultWebListen,
+		DBPath:           defaultDBPath,
+		RetentionDays:    defaultRetention,
+		SkipPTR:          true,    // router/OS PTR noise is swallowed by default
+		DoHLogLevel:      "debug", // aggregated blocks stay out of Info output
+		DoHWindow:        "10s",   // aggregation window for dns_blocked_doh
 
 		BlocklistRefreshHours: 24, // remote-list refresh period
 	}
@@ -96,6 +100,15 @@ func Load(path string) (Config, error) {
 			return Config{}, fmt.Errorf("%s %q: need host:port (net.JoinHostPort for IPv6 literals): %w", addr.name, addr.val, err)
 		}
 	}
+	// Fallback may be a plain host:port or a DoH endpoint (https://...);
+	// only the former is validated here.
+	if cfg.FallbackUpstream != "" &&
+		!strings.HasPrefix(cfg.FallbackUpstream, "https://") &&
+		!strings.HasPrefix(cfg.FallbackUpstream, "http://") {
+		if _, _, err := net.SplitHostPort(cfg.FallbackUpstream); err != nil {
+			return Config{}, fmt.Errorf("fallback_upstream %q: need host:port or https:// URL: %w", cfg.FallbackUpstream, err)
+		}
+	}
 	return cfg, nil
 }
 
@@ -108,6 +121,7 @@ func overrides(c *Config) []override {
 	return []override{
 		{"MONITOR_INTERFACE", func(v string) error { c.Interface = v; return nil }},
 		{"MONITOR_UPSTREAM_DNS", func(v string) error { c.UpstreamDNS = v; return nil }},
+		{"MONITOR_FALLBACK_UPSTREAM", func(v string) error { c.FallbackUpstream = v; return nil }},
 		{"MONITOR_DNS_LISTEN", func(v string) error { c.DNSListen = v; return nil }},
 		{"MONITOR_WEB_LISTEN", func(v string) error { c.WebListen = v; return nil }},
 		{"MONITOR_DB_PATH", func(v string) error { c.DBPath = v; return nil }},

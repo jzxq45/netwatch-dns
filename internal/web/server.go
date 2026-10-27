@@ -20,11 +20,14 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"unicode/utf8"
 
 	"monitor/internal/devices"
 	"monitor/internal/metrics"
@@ -53,6 +56,16 @@ const (
 	feedLimit = 100
 	apiLimit  = 500
 )
+
+// domainPattern limits rule domains to a conservative charset; further
+// per-label checks remain the store's / matcher's responsibility.
+var domainPattern = regexp.MustCompile(`^[a-zA-Z0-9_.-]+$`)
+
+// maxDomainLen is the maximum length of a fully qualified domain name.
+const maxDomainLen = 253
+
+// maxDeviceNameLen caps user-provided device display names.
+const maxDeviceNameLen = 64
 
 func New(st Store, log *slog.Logger) *Server {
 	if log == nil {
@@ -816,7 +829,11 @@ func (s *Server) apiSetRule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	domain := strings.TrimSpace(body.Domain)
-	if domain == "" || (body.Action != store.RuleBlock && body.Action != store.RuleAllow) {
+	if domain == "" || len(domain) > maxDomainLen || !domainPattern.MatchString(domain) {
+		http.Error(w, "invalid domain or action", http.StatusBadRequest)
+		return
+	}
+	if body.Action != store.RuleBlock && body.Action != store.RuleAllow {
 		http.Error(w, "invalid domain or action", http.StatusBadRequest)
 		return
 	}
@@ -899,7 +916,12 @@ func (s *Server) apiRenameDevice(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid ip", http.StatusBadRequest)
 		return
 	}
-	if err := s.st.SetDeviceHostname(r.Context(), body.IP, strings.TrimSpace(body.Name)); err != nil {
+	name := strings.TrimSpace(body.Name)
+	if utf8.RuneCountInString(name) > maxDeviceNameLen {
+		http.Error(w, "invalid name", http.StatusBadRequest)
+		return
+	}
+	if err := s.st.SetDeviceHostname(r.Context(), body.IP, name); err != nil {
 		s.fail(w, "set device hostname", err)
 		return
 	}

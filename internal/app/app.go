@@ -38,6 +38,7 @@ func Run(ctx context.Context, cfg config.Config) error {
 	// dns owns DB writes and stops before the deferred db.Close runs.
 	dnsSrv := dnssrv.New(dnssrv.Config{
 		Upstream:              cfg.UpstreamDNS,
+		FallbackUpstream:      cfg.FallbackUpstream,
 		SkipPTR:               cfg.SkipPTR,
 		Blocklist:             cfg.DoHBlocklist, // nil → built-in defaults
 		BlocklistFiles:        cfg.BlocklistFiles,
