@@ -38,6 +38,8 @@ class SettingsActivity : AppCompatActivity() {
         status.text = getString(R.string.status_testing)
         val target = base() + "/healthz"
         val token = edtToken.text.toString().trim()
+        val btnTest = findViewById<Button>(R.id.btnTest)
+        btnTest.isEnabled = false
         Thread {
             val msg: String = try {
                 val conn = URL(target).openConnection() as HttpURLConnection
@@ -52,7 +54,10 @@ class SettingsActivity : AppCompatActivity() {
             } catch (e: Exception) {
                 getString(R.string.status_fail, e.message ?: "unknown")
             }
-            runOnUiThread { status.text = msg }
+            runOnUiThread {
+                status.text = msg
+                btnTest.isEnabled = true
+            }
         }.start()
     }
 

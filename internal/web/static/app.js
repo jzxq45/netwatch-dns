@@ -101,6 +101,12 @@
       btnPhonePair.addEventListener('click', function () {
         phonePairCard.style.display = phonePairCard.style.display === 'none' ? 'block' : 'none';
       });
+      // BUG-09: закрывать подсказку по Escape
+      document.addEventListener('keydown', function (ev) {
+        if (ev.key === 'Escape' && phonePairCard.style.display !== 'none') {
+          phonePairCard.style.display = 'none';
+        }
+      });
     }
 
     if (btnCopy) {
@@ -116,7 +122,9 @@
 
     if (btnToggle) {
       btnToggle.addEventListener('click', function () {
+        // BUG-06: защита от дублирующих кликов
         errBox.style.display = 'none';
+        btnToggle.disabled = true;
         btnToggle.textContent = 'Применение...';
         var next = !localDnsActive;
         fetch('/api/local-dns', {
@@ -134,13 +142,16 @@
           applyDnsState(localDnsActive);
           errBox.textContent = err.message || 'Ошибка изменения DNS';
           errBox.style.display = 'block';
-        });
+        })
+        .finally(function () { btnToggle.disabled = false; });
       });
     }
 
     if (btnAutostart) {
       btnAutostart.addEventListener('click', function () {
+        // BUG-06: защита от дублирующих кликов
         var next = !autostartActive;
+        btnAutostart.disabled = true;
         fetch('/api/autostart', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -154,32 +165,74 @@
         })
         .catch(function (err) {
           alert('Ошибка настройки автозапуска: ' + (err.message || err));
-        });
+        })
+        .finally(function () { btnAutostart.disabled = false; });
       });
     }
   }
 
-  // Rename device button handling on /device?ip=...
+  // Rename device: inline input instead of window.prompt
   var btnRename = document.getElementById('btnRenameDev');
-  if (btnRename) {
-    btnRename.addEventListener('click', function () {
-      var nameVal = document.getElementById('devNameVal');
-      var curr = nameVal ? nameVal.textContent.trim() : '';
-      if (curr === '—') curr = '';
+  var devNameWrap = document.getElementById('devNameWrap');
+  if (btnRename && devNameWrap) {
+    function staticName() {
+      var el = document.getElementById('devNameVal');
+      return el ? el.textContent.trim() : '';
+    }
+    function renderName(name) {
+      var shown = name || '\u2014';
+      devNameWrap.innerHTML = '<span id="devNameVal"></span> <button class="chip link" id="btnRenameDev" style="cursor:pointer;margin-left:.4rem">\u270F\uFE0F изменить</button>';
+      document.getElementById('devNameVal').textContent = shown;
+      bindRename();
+    }
+    function bindRename() {
+      var b = document.getElementById('btnRenameDev');
+      if (!b) return;
+      b.disabled = false;
+      b.addEventListener('click', beginRename);
+    }
+    function beginRename() {
+      var curr = staticName();
+      if (curr === '\u2014') curr = '';
       var ip = new URLSearchParams(window.location.search).get('ip');
-      var next = prompt('Имя устройства для ' + ip + ':', curr);
-      if (next === null) return;
-      fetch('/api/device/rename', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ip: ip, name: next.trim() })
-      })
-      .then(function (r) {
-        if (!r.ok) throw new Error('Не удалось сохранить');
-        if (nameVal) nameVal.textContent = next.trim() || '—';
-      })
-      .catch(function (e) { alert(e.message); });
-    });
+      devNameWrap.innerHTML = '<input type="text" class="chip" id="inputDevName" value="' + curr.replace(/"/g, '&quot;') + '"> ' +
+        '<button class="chip link" id="btnSaveDevName" style="cursor:pointer">\u2713</button> ' +
+        '<button class="chip link" id="btnCancelDevName" style="cursor:pointer">\u2715</button>';
+      var input = document.getElementById('inputDevName');
+      var btnSave = document.getElementById('btnSaveDevName');
+      var btnCancel = document.getElementById('btnCancelDevName');
+      input.focus();
+      input.select();
+
+      function save() {
+        var next = input.value.trim();
+        btnSave.disabled = true;
+        btnCancel.disabled = true;
+        fetch('/api/device/rename', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ip: ip, name: next })
+        })
+        .then(function (r) {
+          if (!r.ok) throw new Error('Не удалось сохранить');
+          renderName(next);
+        })
+        .catch(function (e) {
+          alert(e.message);
+          renderName(staticName() || curr);
+        });
+      }
+      function cancel() { renderName(curr); }
+
+      input.addEventListener('keydown', function (ev) {
+        if (ev.key === 'Enter') { ev.preventDefault(); save(); }
+        else if (ev.key === 'Escape') { ev.preventDefault(); cancel(); }
+      });
+      btnSave.addEventListener('click', save);
+      btnCancel.addEventListener('click', cancel);
+    }
+    btnRename.addEventListener('click', beginRename);
+    btnRename.disabled = false;
   }
 
   // Quick block buttons: delegated so static and SSE-inserted rows share it.
@@ -187,9 +240,11 @@
   if (feedTbody) {
     feedTbody.addEventListener('click', function (ev) {
       var btn = ev.target.closest('.btn-block-dom');
-      if (!btn) return;
+      if (!btn || btn.disabled) return;
       var dom = btn.getAttribute('data-dom');
       if (!dom) return;
+      // BUG-06: защита от дублирующих кликов
+      btn.disabled = true;
       fetch('/api/rules', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -202,7 +257,10 @@
         btn.style.color = 'var(--accent2)';
         btn.disabled = true;
       })
-      .catch(function (e) { alert(e.message); });
+      .catch(function (e) {
+        alert(e.message);
+        btn.disabled = false;
+      });
     });
   }
 
