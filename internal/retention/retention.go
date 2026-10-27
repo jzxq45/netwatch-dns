@@ -14,6 +14,11 @@ import (
 // only after this stops sweeping, which the caller relies on to close the DB
 // without racing an in-flight DeleteOld.
 func Start(ctx context.Context, db *store.Store, days int) error {
+	defer func() {
+		if p := recover(); p != nil {
+			slog.Error("retention panic recovered", "panic", p)
+		}
+	}()
 	tick := time.NewTicker(24 * time.Hour)
 	defer tick.Stop()
 	cutoff := func() int64 { return time.Now().AddDate(0, 0, -days).Unix() }

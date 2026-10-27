@@ -1,0 +1,118 @@
+# Built-in ad/tracker/telemetry blocklist (plain domains, one per line).
+# Loaded automatically when blocklist_files is not configured.
+
+# Google ads & analytics
+doubleclick.net
+ad.doubleclick.net
+stats.g.doubleclick.net
+googleadservices.com
+googlesyndication.com
+adservice.google.com
+pagead2.googlesyndication.com
+googletagmanager.com
+googletagservices.com
+google-analytics.com
+
+# Yandex / VK / Mail.ru
+an.yandex.ru
+mc.yandex.ru
+metrika.yandex.ru
+appmetrica.yandex.com
+tracking.mobile.yandex.net
+ad.mail.ru
+reklama.mail.ru
+top-fwz1.mail.ru
+ads.vk.com
+an.vk.com
+target.my.com
+adfox.ru
+
+# TikTok
+ads.tiktok.com
+analytics.tiktok.com
+business-api.tiktok.com
+
+# Microsoft telemetry & ads
+telemetry.microsoft.com
+vortex.data.microsoft.com
+settings-win.data.microsoft.com
+watson.telemetry.microsoft.com
+browser.events.data.microsoft.com
+mobile.events.data.microsoft.com
+dc.services.visualstudio.com
+ads.microsoft.com
+bat.bing.com
+
+# Meta / X / LinkedIn / Yahoo
+connect.facebook.net
+pixel.facebook.com
+analytics.facebook.com
+ads.twitter.com
+static.ads-twitter.com
+analytics.twitter.com
+ads.linkedin.com
+ads.yahoo.com
+geo.yahoo.com
+analytics.yahoo.com
+
+# Firebase / Crashlytics
+app-measurement.com
+firebase-settings.crashlytics.com
+crashlytics.com
+
+# Samsung
+tracking.samsungcloudplatform.com
+samsungads.com
+ads.samsung.com
+log-ingestion.samsungacr.com
+
+# Apple advertising
+advertising.apple.com
+iadsdk.apple.com
+
+# Ad networks & exchanges
+advertising.com
+adnxs.com
+adsrvr.org
+rubiconproject.com
+pubmatic.com
+openx.net
+criteo.com
+criteo.net
+taboola.com
+outbrain.com
+scorecardresearch.com
+quantserve.com
+moatads.com
+amazon-adsystem.com
+
+# Mobile ad SDKs
+adcolony.com
+applovin.com
+unityads.unity3d.com
+vungle.com
+chartboost.com
+ironsrc.com
+ads.mopub.com
+mopub.com
+inmobi.com
+startapp.com
+tapjoy.com
+
+# Attribution & analytics SDKs
+branch.io
+appsflyer.com
+adjust.com
+kochava.com
+singular.net
+tenjin.io
+
+# Device vendor telemetry
+tracking.miui.com
+tracking.intl.miui.com
+data.mistat.xiaomi.com
+ad.xiaomi.com
+logservice.hicloud.com
+metrics5.data.hicloud.com
+data.ads.oppomobile.com
+adsfs.oppomobile.com

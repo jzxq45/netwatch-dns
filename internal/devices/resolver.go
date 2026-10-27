@@ -6,6 +6,8 @@ package devices
 import (
 	"context"
 	"log/slog"
+	"sync"
+	"time"
 
 	"monitor/internal/metrics"
 )
@@ -29,6 +31,7 @@ const (
 	// per DNS query. Without it the resolver is a second, unbached writer
 	// racing the sink for the single writer connection.
 	debouncedSeconds = 30
+	maxTrackedIPs    = 4096
 )
 
 // Resolver turns DNS sightings into device rows. mac/hostname stay untouched —
@@ -38,6 +41,7 @@ type Resolver struct {
 	log   *slog.Logger
 
 	sightings chan Record
+	macCache  sync.Map
 }
 
 func New(st Store, log *slog.Logger) *Resolver {
@@ -63,6 +67,12 @@ func (r *Resolver) Feed(rec Record) {
 
 // Start processes sightings until ctx is done; returns when drained.
 func (r *Resolver) Start(ctx context.Context) error {
+	defer func() {
+		if p := recover(); p != nil {
+			r.log.Error("resolver panic recovered", "panic", p)
+		}
+	}()
+
 	// IP → freshest persisted sighting; LAN-sized (a handful of entries).
 	last := make(map[string]int64)
 	for {
@@ -71,6 +81,24 @@ func (r *Resolver) Start(ctx context.Context) error {
 			if !ok {
 				return nil
 			}
+			if len(last) >= maxTrackedIPs {
+				now := time.Now().Unix()
+				for ip, seen := range last {
+					if now-seen > 3600 {
+						delete(last, ip)
+					}
+				}
+				if len(last) >= maxTrackedIPs {
+					drop := maxTrackedIPs / 2
+					for ip := range last {
+						delete(last, ip)
+						drop--
+						if drop <= 0 {
+							break
+						}
+					}
+				}
+			}
 			seenAt, seen := last[rec.ClientIP]
 			last[rec.ClientIP] = rec.TS // freshest state always remembered
 			if seen && rec.TS-seenAt < debouncedSeconds {
@@ -78,10 +106,9 @@ func (r *Resolver) Start(ctx context.Context) error {
 			}
 			r.upsert(ctx, rec)
 		case <-ctx.Done():
-			// Drain: the exec path must survive the parent cancel — ExecContext
-			// on a canceled context rejects instantly and would silently lose
-			// every queued sighting (that bug cost us a shutdown data loss).
-			dctx := context.WithoutCancel(ctx)
+			// Drain: bounded timeout so stuck DB never blocks graceful shutdown.
+			dctx, dcancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+			defer dcancel()
 			for {
 				select {
 				case rec := <-r.sightings:
@@ -104,7 +131,22 @@ func (r *Resolver) upsert(ctx context.Context, rec Record) {
 	if rec.ClientIP == "" {
 		return
 	}
-	if err := r.store.UpsertDevice(ctx, rec.ClientIP, nil, nil, rec.TS); err != nil {
+	var macPtr *string
+	if val, ok := r.macCache.Load(rec.ClientIP); ok {
+		m := val.(string)
+		if m != "" {
+			macPtr = &m
+		}
+	} else {
+		r.macCache.Store(rec.ClientIP, "")
+		go func(ip string, ts int64) {
+			if mac, err := LookupMAC(ip); err == nil && mac != "" {
+				r.macCache.Store(ip, mac)
+				_ = r.store.UpsertDevice(context.Background(), ip, &mac, nil, ts)
+			}
+		}(rec.ClientIP, rec.TS)
+	}
+	if err := r.store.UpsertDevice(ctx, rec.ClientIP, macPtr, nil, rec.TS); err != nil {
 		r.log.Error("device upsert", "err", err)
 	}
 }

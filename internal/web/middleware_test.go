@@ -29,6 +29,9 @@ func (failingStore) NoisyEventsSince(context.Context, int64) (int, error) {
 func (failingStore) EventsSince(context.Context, int64, int) ([]store.Event, error) {
 	return nil, fixtureErr
 }
+func (failingStore) HourlyActivity(context.Context, int64) ([]store.HourlyBucket, error) {
+	return nil, fixtureErr
+}
 func (failingStore) DeviceByIP(context.Context, string) (*store.DeviceRow, error) {
 	return nil, fixtureErr
 }
@@ -40,6 +43,18 @@ func (failingStore) ListDevices(context.Context) ([]store.DeviceRow, error) {
 }
 func (failingStore) TopDomains(context.Context, int64, int) ([]store.TopRow, error) {
 	return nil, fixtureErr
+}
+func (failingStore) SetDeviceHostname(context.Context, string, string) error {
+	return fixtureErr
+}
+func (failingStore) ListCustomRules(context.Context) ([]store.CustomRule, error) {
+	return nil, fixtureErr
+}
+func (failingStore) SetCustomRule(context.Context, string, string) error {
+	return fixtureErr
+}
+func (failingStore) DeleteCustomRule(context.Context, string) error {
+	return fixtureErr
 }
 
 // TestRecovery: a handler panic must become a 500 — never a crashed process.

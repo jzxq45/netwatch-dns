@@ -23,6 +23,13 @@ type Event struct {
 	Noise    bool
 }
 
+// HourlyBucket is one hour of DNS activity for the timeline chart.
+type HourlyBucket struct {
+	TS      int64 `json:"ts"`
+	Total   int   `json:"total"`
+	Blocked int   `json:"blocked"`
+}
+
 // DeviceRow is one devices entry.
 type DeviceRow struct {
 	IP       string
@@ -118,7 +125,7 @@ func mergeEvents(a, b []Event, limit int) []Event {
 
 // RecentEvents returns the newest clear (non-noise) events, newest first.
 func (s *Store) RecentEvents(ctx context.Context, limit int) ([]Event, error) {
-	dnsa, err := s.queryDNSEvents(ctx, "WHERE COALESCE(noise,0)=0", nil, limit)
+	dnsa, err := s.queryDNSEvents(ctx, "WHERE noise = 0", nil, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -147,7 +154,7 @@ func (s *Store) RecentEventsAll(ctx context.Context, limit int) ([]Event, error)
 func (s *Store) NoisyEventsSince(ctx context.Context, sinceTS int64) (int, error) {
 	var n int
 	if err := s.read.QueryRowContext(ctx,
-		`SELECT count(*) FROM dns_log WHERE COALESCE(noise,0)=1 AND ts >= ?`, sinceTS).
+		`SELECT count(*) FROM dns_log WHERE noise = 1 AND ts >= ?`, sinceTS).
 		Scan(&n); err != nil {
 		return 0, fmt.Errorf("noise count: %w", err)
 	}
@@ -166,6 +173,36 @@ func (s *Store) EventsSince(ctx context.Context, since int64, limit int) ([]Even
 		return nil, err
 	}
 	return mergeEvents(dnsa, snie, limit), nil
+}
+
+// HourlyActivity aggregates dns_log into hour buckets. Blocked uses the
+// noise flag (blocked and noisy rows are both stored as noise=1).
+func (s *Store) HourlyActivity(ctx context.Context, sinceTS int64) ([]HourlyBucket, error) {
+	rows, err := s.read.QueryContext(ctx, `
+		SELECT (ts / 3600) * 3600 AS bucket,
+		       COUNT(*) AS total,
+		       COALESCE(SUM(CASE WHEN noise = 1 THEN 1 ELSE 0 END), 0) AS blocked
+		FROM dns_log
+		WHERE ts >= ?
+		GROUP BY bucket
+		ORDER BY bucket ASC`, sinceTS)
+	if err != nil {
+		return nil, fmt.Errorf("hourly activity: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	out := make([]HourlyBucket, 0, 24)
+	for rows.Next() {
+		var b HourlyBucket
+		if err := rows.Scan(&b.TS, &b.Total, &b.Blocked); err != nil {
+			return nil, fmt.Errorf("scan hourly activity: %w", err)
+		}
+		out = append(out, b)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate hourly activity: %w", err)
+	}
+	return out, nil
 }
 
 // DeviceByIP returns one device row or nil when unknown.
@@ -222,7 +259,7 @@ func (s *Store) TopDomains(ctx context.Context, sinceTS int64, limit int) ([]Top
 SELECT d.ip, COALESCE(d.hostname,''), t.domain, t.cnt
 FROM (
     SELECT client_ip, domain, count(*) AS cnt
-    FROM dns_log WHERE ts > ? AND COALESCE(noise,0)=0
+    FROM dns_log WHERE ts > ? AND noise = 0
     GROUP BY client_ip, domain
 ) t JOIN devices d ON d.ip = t.client_ip
 ORDER BY d.ip, cnt DESC LIMIT ?`

@@ -12,27 +12,31 @@ import (
 )
 
 type Config struct {
-	Interface      string   `yaml:"interface"`    // LAN iface for SNI capture / device resolver
-	UpstreamDNS    string   `yaml:"upstream_dns"` // resolver PC forwards queries to
-	DNSListen      string   `yaml:"dns_listen"`   // UDP+TCP listener for the DNS server
-	WebListen      string   `yaml:"web_listen"`   // web UI / health endpoint
-	DBPath         string   `yaml:"db_path"`      // SQLite file
-	RetentionDays  int      `yaml:"retention_days"`
-	DoHBlocklist   []string `yaml:"doh_blocklist"`        // replaces built-in list when set
-	SkipPTR        bool     `yaml:"skip_ptr"`             // swallow PTR in-addr.arpa queries locally
-	SearchSuffixes []string `yaml:"search_suffixes"`      // stripped from logged domain names
-	DoHLogLevel    string   `yaml:"doh_log_level"`        // debug|info|off for dns_blocked_doh
-	DoHWindow      string   `yaml:"doh_aggregate_window"` // e.g. 10s
-	NoiseDomains   []string `yaml:"noise_domains"`        // bg traffic: noise=1 in db, hidden from stdout/feed
-	WebToken       string   `yaml:"web_token"`            // when set: web UI needs X-Auth-Token / ?token= / cookie
+	Interface             string   `yaml:"interface"`    // LAN iface for SNI capture / device resolver
+	UpstreamDNS           string   `yaml:"upstream_dns"` // resolver PC forwards queries to
+	DNSListen             string   `yaml:"dns_listen"`   // UDP+TCP listener for the DNS server
+	WebListen             string   `yaml:"web_listen"`   // web UI / health endpoint
+	DBPath                string   `yaml:"db_path"`      // SQLite file
+	RetentionDays         int      `yaml:"retention_days"`
+	DoHBlocklist          []string `yaml:"doh_blocklist"`                     // replaces built-in list when set
+	BlocklistFiles        []string `yaml:"blocklist_files,omitempty"`         // extra hosts/adblock files
+	BlocklistURLs         []string `yaml:"blocklist_urls,omitempty"`          // remote hosts/adblock lists
+	BlocklistRefreshHours int      `yaml:"blocklist_refresh_hours,omitempty"` // refresh period; 0 disables
+	SkipPTR               bool     `yaml:"skip_ptr"`                          // swallow PTR in-addr.arpa queries locally
+	SearchSuffixes        []string `yaml:"search_suffixes"`                   // stripped from logged domain names
+	DoHLogLevel           string   `yaml:"doh_log_level"`                     // debug|info|off for dns_blocked_doh
+	DoHWindow             string   `yaml:"doh_aggregate_window"`              // e.g. 10s
+	NoiseDomains          []string `yaml:"noise_domains"`                     // bg traffic: noise=1 in db, hidden from stdout/feed
+	WebToken              string   `yaml:"web_token"`                         // when set: web UI needs X-Auth-Token / ?token= / cookie
 }
 
 const (
-	defaultUpstreamDNS = "1.1.1.1:53"
-	defaultDNSListen   = "0.0.0.0:53"
-	defaultWebListen   = "127.0.0.1:8080"
-	defaultDBPath      = "monitor.db"
-	defaultRetention   = 7
+	defaultUpstreamDNS   = "1.1.1.1:53"
+	defaultDNSListen     = "0.0.0.0:53"
+	defaultWebListen     = "127.0.0.1:8080"
+	defaultDBPath        = "monitor.db"
+	defaultRetention     = 7
+	defaultBlocklistFile = "blocklist.txt"
 )
 
 // Load reads YAML from path (missing file is fine — defaults apply) and
@@ -47,6 +51,8 @@ func Load(path string) (Config, error) {
 		SkipPTR:       true,    // router/OS PTR noise is swallowed by default
 		DoHLogLevel:   "debug", // aggregated blocks stay out of Info output
 		DoHWindow:     "10s",   // aggregation window for dns_blocked_doh
+
+		BlocklistRefreshHours: 24, // remote-list refresh period
 	}
 	if data, err := os.ReadFile(path); err == nil {
 		if err := yaml.Unmarshal(data, &cfg); err != nil {
@@ -65,6 +71,13 @@ func Load(path string) (Config, error) {
 			if err := o.apply(v); err != nil {
 				return Config{}, err
 			}
+		}
+	}
+	// Work out of the box: when no list files are configured explicitly,
+	// pick up the bundled blocklist.txt sitting next to the executable/cwd.
+	if len(cfg.BlocklistFiles) == 0 {
+		if _, err := os.Stat(defaultBlocklistFile); err == nil {
+			cfg.BlocklistFiles = []string{defaultBlocklistFile}
 		}
 	}
 	if cfg.RetentionDays < 1 {

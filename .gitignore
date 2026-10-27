@@ -11,6 +11,7 @@ dist/
 *.db-journal
 *.log
 .webview2/
+.cache/
 
 # --- Android ---
 android/.gradle/

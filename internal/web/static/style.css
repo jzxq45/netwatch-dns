@@ -75,3 +75,23 @@ td .barwrap{display:grid;grid-template-columns:1fr 3.5rem;align-items:center;gap
 .backlink{color:var(--muted);font-size:.85rem}
 .kv{display:grid;grid-template-columns:auto auto;gap:.25rem 1rem;font-size:.9rem}
 .kv b{color:var(--muted);font-weight:500}
+
+/* ---------- activity chart ---------- */
+.chart-grid{display:flex;align-items:flex-end;gap:4px;height:110px}
+.chart-col{flex:1;min-width:0;height:100%;display:flex;flex-direction:column;
+  align-items:center;justify-content:flex-end;gap:2px}
+.chart-bar{position:relative;width:100%;min-height:1px;max-height:calc(100% - 16px);
+  background:var(--panel2);border-radius:3px 3px 0 0;overflow:hidden}
+.chart-seg{position:absolute;left:0;right:0;bottom:0;display:block;border-radius:2px}
+.chart-seg.normal{background:var(--accent)}
+.chart-seg.blocked{background:#ff8080}
+.chart-label{font:0.55rem var(--mono);color:var(--muted);white-space:nowrap;height:14px}
+
+/* ---------- mobile ---------- */
+@media (max-width: 640px){
+  main{padding:.6rem}
+  .topbar{padding:.5rem .8rem;gap:.6rem;flex-wrap:wrap}
+  table{display:block;overflow-x:auto;-webkit-overflow-scrolling:touch}
+  .cards{grid-template-columns:1fr}
+  .rowbar{grid-template-columns:6rem 1fr 2.5rem;gap:.4rem}
+}

@@ -62,6 +62,7 @@ func TestRoutes(t *testing.T) {
 		{"top", "/top?period=1h", http.StatusOK, "example.com."},
 		{"bad period", "/top?period=-h", http.StatusBadRequest, ""},
 		{"api", "/api/events?since=0", http.StatusOK, ""},
+		{"api network", "/api/network", http.StatusOK, "lan_ip"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -182,5 +183,69 @@ func TestAPIEventsJSON(t *testing.T) {
 		if ev[i-1].TS < ev[i].TS {
 			t.Fatalf("not sorted desc: %+v", ev)
 		}
+	}
+}
+
+func TestAPICustomRules(t *testing.T) {
+	t.Parallel()
+	srv := New(seedStore(t), nil)
+	var gotDomain, gotAction string
+	var gotDeleted bool
+	srv.OnRuleChanged = func(domain, action string, deleted bool) {
+		gotDomain, gotAction, gotDeleted = domain, action, deleted
+	}
+	h := srv.Handler()
+
+	list := func() []store.CustomRule {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/rules", nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("list status = %d", rec.Code)
+		}
+		var rules []store.CustomRule
+		if err := json.Unmarshal(rec.Body.Bytes(), &rules); err != nil {
+			t.Fatalf("list json: %v", err)
+		}
+		return rules
+	}
+
+	if rules := list(); len(rules) != 0 {
+		t.Fatalf("initial rules = %v, want empty", rules)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/rules",
+		strings.NewReader(`{"domain":"ads.example.com","action":"block"}`))
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("set status = %d; body=%s", rec.Code, rec.Body)
+	}
+	if gotDomain != "ads.example.com" || gotAction != store.RuleBlock || gotDeleted {
+		t.Fatalf("callback = (%q,%q,%v)", gotDomain, gotAction, gotDeleted)
+	}
+
+	rules := list()
+	if len(rules) != 1 || rules[0].Domain != "ads.example.com" || rules[0].Action != store.RuleBlock {
+		t.Fatalf("rules after set = %+v", rules)
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/api/rules",
+		strings.NewReader(`{"domain":"ads.example.com","action":"drop"}`))
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("invalid action status = %d, want 400", rec.Code)
+	}
+
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, "/api/rules?domain=ads.example.com", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("delete status = %d; body=%s", rec.Code, rec.Body)
+	}
+	if !gotDeleted || gotDomain != "ads.example.com" {
+		t.Fatalf("delete callback = (%q,%q,%v)", gotDomain, gotAction, gotDeleted)
+	}
+	if rules := list(); len(rules) != 0 {
+		t.Fatalf("rules after delete = %v, want empty", rules)
 	}
 }

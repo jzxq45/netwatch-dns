@@ -14,8 +14,9 @@ CREATE TABLE IF NOT EXISTS dns_log (
     ts        INTEGER,
     noise     INTEGER NOT NULL DEFAULT 0
 );
-CREATE INDEX IF NOT EXISTS idx_dns_ts     ON dns_log(ts);
-CREATE INDEX IF NOT EXISTS idx_dns_client ON dns_log(client_ip);
+CREATE INDEX IF NOT EXISTS idx_dns_ts        ON dns_log(ts);
+CREATE INDEX IF NOT EXISTS idx_dns_client    ON dns_log(client_ip);
+CREATE INDEX IF NOT EXISTS idx_dns_client_ts ON dns_log(client_ip, ts DESC);
 
 CREATE TABLE IF NOT EXISTS sni_log (
     id        INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -24,6 +25,12 @@ CREATE TABLE IF NOT EXISTS sni_log (
     ts        INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_sni_ts ON sni_log(ts);
+
+CREATE TABLE IF NOT EXISTS custom_rules (
+    domain     TEXT PRIMARY KEY,
+    action     TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS flow_log (
     id       INTEGER PRIMARY KEY AUTOINCREMENT,

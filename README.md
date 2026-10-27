@@ -1,7 +1,9 @@
 # netwatch-dns
 
-> Passive DNS telemetry for your home LAN. See what domains each device
-> resolves — with no client-side install on phones or laptops.
+> Passive DNS telemetry, ad-blocking and device intelligence for your home
+> LAN. See what domains each device resolves, block trackers and ads, and
+> identify every gadget on the network — with no client-side install on
+> phones or laptops.
 
 [![CI](https://github.com/jzxq45/netwatch-dns/actions/workflows/ci.yml/badge.svg)](https://github.com/jzxq45/netwatch-dns/actions/workflows/ci.yml)
 [![Go version](https://img.shields.io/badge/go-1.26%2B-00ADD8?logo=go)](https://go.dev/)
@@ -23,9 +25,23 @@
 - Returns **NXDOMAIN for known DoH/DoT endpoints** (`dns.google`,
   `chrome.cloudflare-dns.com`, …) — *preventing DNS filtering bypass by
   clients* that hardcode their own resolvers.
+- **AdBlock engine**: ships with a built-in [`blocklist.txt`](blocklist.txt),
+  supports background refresh by URL (`blocklist_urls`), whitelist always
+  wins, and you can send an offending domain to the blocklist in one click
+  straight from the live feed (🚫).
+- **Device intelligence**: Win32 `SendARP` resolves MAC addresses without
+  any drivers, an IEEE OUI vendor database names the maker (Apple, Samsung,
+  Xiaomi, …), and devices can be renamed by hand.
+- **Powerful DNS engine**: RFC 1035-compliant response cache, DNS-over-HTTPS
+  (DoH) upstream, thundering-herd protection (singleflight collapse of
+  identical in-flight queries), and automatic fallback to a LAN IP if port
+  53 is taken by the OS.
 - Web UI (server-rendered, no build step): a live feed, a device list with a
-  per-device query log, per-device top domains for any time window, and a small
-  JSON API.
+  per-device query log, per-device top domains for any time window, a 24h
+  activity graph, history export to CSV and JSON (`/api/export`), and a
+  small JSON API.
+- **Mobile companion**: hand out `netwatch.apk` straight from the web panel
+  (`/download/netwatch.apk`); the UI is fully responsive on phones.
 - Automatic retention: rows older than N days (default 7) are deleted daily.
 
 ## What it does NOT do
@@ -39,8 +55,6 @@
 - **No tracking of HTTP traffic.** Only DNS lookups (domain names), not which
   sites are opened or for how long.
 - **No cloud.** Everything stays on the monitor host disk.
-- Devices table currently holds only IP + first-seen/last-seen time.
-  MAC/hostname stay empty because there is no ARP/DHCP listening by design.
 
 ## How it works
 
@@ -89,18 +103,25 @@
 Grab [`netwatch-windows-amd64.zip`](https://github.com/jzxq45/netwatch-dns/releases/latest)
 from GitHub Releases. It contains:
 
-- **`netwatch.exe`** — desktop app: a window with the live UI (WebView2).
-  Closing the window stops the servers gracefully. Double-click it and you
-  are done. Errors surface as native dialogs; logs land in `netwatch.log`
-  next to the binary. Requires the WebView2 runtime (preinstalled on
-  Windows 11; on old Windows 10 installs it via https://aka.ms/webview2 —
-  otherwise the UI automatically opens in your default browser).
+- **`netwatch.exe`** — zero-friction desktop app:
+  - auto-detects the LAN IP and the router gateway;
+  - **one-click DNS switch** to point Windows at netwatch (and back);
+  - **auto-start** via the Windows registry (toggle in the UI);
+  - **automatic Windows Firewall tuning** — opens UDP 53 and TCP 8080 for you;
+  - minimizes to the **system tray** with an icon and a context menu;
+    closing the tray stops the servers gracefully;
+  - if port 53 is taken by the OS, it **falls back to a LAN IP** and keeps
+    serving. Errors surface as native dialogs; logs land in `netwatch.log`
+    next to the binary. Requires the WebView2 runtime (preinstalled on
+    Windows 11; on old Windows 10 installs it via https://aka.ms/webview2 —
+    otherwise the UI automatically opens in your default browser).
 - **`monitor.exe`** — classic console server (for scheduled tasks, services,
   remote hosts): same engine, logs to stdout.
 - `monitor.yaml.example` — annotated config template.
 
 Both binaries are built with `CGO_ENABLED=0` and embed everything (UI, static
-assets); only the WebView2 runtime on the user's machine is external.
+assets); only the WebView2 runtime on the user's machine is external. To cut
+a local release zip, run `scripts/build_dist.ps1`.
 
 ## Quick Start
 
@@ -233,10 +254,15 @@ More: [docs/ANDROID.md](docs/ANDROID.md) (mobile app specifics).
 - [x] Hardening: full server timeouts, panic recovery, per-IP rate limiting,
       read/write DB pool split, chunked retention, DNS admission control +
       LAN-only ACL, expvar counters exposed at `/metrics`
-- [x] Windows desktop app (`netwatch.exe`, WebView2 window, graceful close)
-- [ ] DNS response cache + upstream connection reuse (remove per-query sockets)
-- [ ] Blocklist feed loading (URL/input lists) — the Pi-hole-style win
-- [ ] Device names via DHCP lease reading (admin side, no sniffing)
+- [x] Windows desktop app (`netwatch.exe`, WebView2 window, graceful close),
+      system tray, one-click DNS switch, registry auto-start, firewall tuning
+- [x] Zero-friction desktop: LAN IP/gateway autodetection, port-53 fallback
+- [x] DNS response cache + upstream singleflight (no per-query sockets)
+- [x] Blocklist engine: built-in `blocklist.txt`, local files, remote URL
+      feeds with background refresh, whitelist priority, one-click block,
+      CSV/JSON export, 24h activity chart
+- [x] Device intelligence: `SendARP` MAC resolution, IEEE OUI vendor names,
+      user-assigned device names, `netwatch.apk` download from the web panel
 - [ ] SNI + NetFlow when a router supports mirroring/flow export
   (schema slots `sni_log`/`flow_log` already exist)
 

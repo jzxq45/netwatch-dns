@@ -4,6 +4,7 @@ import android.annotation.SuppressLint
 import android.content.Intent
 import android.content.SharedPreferences
 import android.os.Bundle
+import android.util.Patterns
 import android.view.KeyEvent
 import android.view.Menu
 import android.view.MenuItem
@@ -14,6 +15,7 @@ import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.Button
+import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.appcompat.app.AlertDialog
@@ -111,16 +113,50 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showFirstRunDialog() {
+        val input = EditText(this).apply {
+            setText(prefs.getString("server_url", null) ?: DEFAULT_URL)
+            hint = DEFAULT_URL
+            setSingleLine(true)
+            setSelection(text.length)
+        }
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(48, 16, 48, 0)
+            addView(
+                input,
+                LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                )
+            )
+        }
         AlertDialog.Builder(this)
             .setTitle(R.string.app_name)
-            .setMessage(getString(R.string.first_run_text, prefs.getString("server_url", null) ?: DEFAULT_URL))
+            .setMessage(getString(R.string.first_run_text, DEFAULT_URL))
+            .setView(container)
             .setPositiveButton(R.string.yes) { _, _ ->
-                prefs.edit().putBoolean("first_run", false).apply()
+                val serverUrl = normalizeServerUrl(input.text.toString())
+                prefs.edit()
+                    .putString("server_url", serverUrl)
+                    .putBoolean("first_run", false)
+                    .apply()
+                load()
             }
             .setNegativeButton(R.string.no) { _, _ -> finish() }
             .setCancelable(false)
             .show()
     }
+
+    private fun normalizeServerUrl(raw: String): String {
+        val trimmed = raw.trim()
+        if (trimmed.isEmpty()) return DEFAULT_URL
+        val withScheme = if (trimmed.contains("://")) trimmed else "http://$trimmed"
+        return if (isValidServerUrl(withScheme)) withScheme else DEFAULT_URL
+    }
+
+    private fun isValidServerUrl(value: String): Boolean =
+        (value.startsWith("http://") || value.startsWith("https://")) &&
+            Patterns.WEB_URL.matcher(value).matches()
 
     private fun openSettings() {
         startActivity(Intent(this, SettingsActivity::class.java))

@@ -5,6 +5,7 @@ import (
 	"context"
 	"log/slog"
 	"net"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -225,6 +226,40 @@ func TestDoHBlocklist(t *testing.T) {
 	}
 	if n < 1 {
 		t.Fatal("blocked query missing from dns_log")
+	}
+}
+
+func TestBlocklistFiles(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "hosts")
+	content := "0.0.0.0 ad.evil.test\n127.0.0.1 tracker.ad.test\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write hosts file: %v", err)
+	}
+
+	db, err := store.Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatalf("store open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	srv := New(Config{BlocklistFiles: []string{path}}, db.DB(), nil)
+
+	if n := srv.BlockedRulesCount(); n == 0 {
+		t.Fatal("BlockedRulesCount() = 0, want > 0")
+	}
+	for _, tt := range []struct {
+		name string
+		want bool
+	}{
+		{"ad.evil.test", true},
+		{"sub.ad.evil.test", true},
+		{"good.test", false},
+	} {
+		if got := srv.isBlocked(tt.name); got != tt.want {
+			t.Fatalf("isBlocked(%q) = %v, want %v", tt.name, got, tt.want)
+		}
 	}
 }
 

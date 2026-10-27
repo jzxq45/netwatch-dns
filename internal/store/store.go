@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	_ "embed"
 	"fmt"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -36,6 +37,8 @@ func Open(path string) (*Store, error) {
 		return nil, fmt.Errorf("open db: %w", err)
 	}
 	write.SetMaxOpenConns(1) // writes must stay serialized (see Store doc)
+	write.SetConnMaxLifetime(30 * time.Minute)
+	write.SetConnMaxIdleTime(5 * time.Minute)
 
 	read, err := sql.Open("sqlite", rdsn)
 	if err != nil {
@@ -44,6 +47,8 @@ func Open(path string) (*Store, error) {
 	}
 	read.SetMaxOpenConns(4)
 	read.SetMaxIdleConns(4)
+	read.SetConnMaxLifetime(30 * time.Minute)
+	read.SetConnMaxIdleTime(5 * time.Minute)
 
 	if _, err := write.Exec(schemaSQL); err != nil {
 		_ = write.Close()
@@ -66,28 +71,39 @@ func Open(path string) (*Store, error) {
 // ensureNoiseColumn adds dns_log.noise to databases created before the
 // noise-filtering feature. Idempotent: no-op when the column exists.
 func ensureNoiseColumn(write *sql.DB) error {
-	rows, err := write.Query(`PRAGMA table_info(dns_log)`)
+	hasNoise, err := func() (bool, error) {
+		rows, err := write.Query(`PRAGMA table_info(dns_log)`)
+		if err != nil {
+			return false, fmt.Errorf("table_info: %w", err)
+		}
+		defer func() { _ = rows.Close() }()
+		for rows.Next() {
+			var cid int
+			var name, typ string
+			var notNull, pk int
+			var dflt any
+			if err := rows.Scan(&cid, &name, &typ, &notNull, &dflt, &pk); err != nil {
+				return false, fmt.Errorf("scan table_info: %w", err)
+			}
+			if name == "noise" {
+				return true, nil
+			}
+		}
+		if err := rows.Err(); err != nil {
+			return false, fmt.Errorf("iterate table_info: %w", err)
+		}
+		return false, nil
+	}()
 	if err != nil {
-		return fmt.Errorf("table_info: %w", err)
+		return err
 	}
-	defer func() { _ = rows.Close() }()
-	for rows.Next() {
-		var cid int
-		var name, typ string
-		var notNull, pk int
-		var dflt any
-		if err := rows.Scan(&cid, &name, &typ, &notNull, &dflt, &pk); err != nil {
-			return fmt.Errorf("scan table_info: %w", err)
-		}
-		if name == "noise" {
-			return nil // column already there
+	if !hasNoise {
+		if _, err := write.Exec(`ALTER TABLE dns_log ADD COLUMN noise INTEGER NOT NULL DEFAULT 0`); err != nil {
+			return fmt.Errorf("add noise column: %w", err)
 		}
 	}
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("iterate table_info: %w", err)
-	}
-	if _, err := write.Exec(`ALTER TABLE dns_log ADD COLUMN noise INTEGER NOT NULL DEFAULT 0`); err != nil {
-		return fmt.Errorf("add noise column: %w", err)
+	if _, err := write.Exec(`CREATE INDEX IF NOT EXISTS idx_dns_noise_ts ON dns_log(noise, ts DESC)`); err != nil {
+		return fmt.Errorf("create noise index: %w", err)
 	}
 	return nil
 }
@@ -119,6 +135,16 @@ func (s *Store) UpsertDevice(ctx context.Context, ip string, mac, hostname *stri
 	          last_seen = excluded.last_seen`
 	if _, err := s.write.ExecContext(ctx, q, ip, mac, hostname, lastSeen); err != nil {
 		return fmt.Errorf("upsert device %s: %w", ip, err)
+	}
+	return nil
+}
+
+// SetDeviceHostname updates or sets a human-friendly name for a device IP.
+func (s *Store) SetDeviceHostname(ctx context.Context, ip, hostname string) error {
+	q := `INSERT INTO devices (ip, hostname, last_seen) VALUES (?, ?, ?)
+	      ON CONFLICT(ip) DO UPDATE SET hostname = excluded.hostname`
+	if _, err := s.write.ExecContext(ctx, q, ip, hostname, time.Now().Unix()); err != nil {
+		return fmt.Errorf("set hostname for %s: %w", ip, err)
 	}
 	return nil
 }

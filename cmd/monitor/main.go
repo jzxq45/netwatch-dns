@@ -11,6 +11,7 @@ import (
 
 	"monitor/internal/app"
 	"monitor/internal/config"
+	"monitor/internal/sysnet"
 )
 
 func main() {
@@ -31,6 +32,10 @@ func run() error {
 	cfg, err := config.Load(*cfgPath)
 	if err != nil {
 		return fmt.Errorf("config: %w", err)
+	}
+
+	if err := sysnet.EnsureFirewallRules(); err != nil {
+		slog.Warn("firewall rules", "err", err)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

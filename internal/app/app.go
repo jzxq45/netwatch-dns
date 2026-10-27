@@ -37,24 +37,49 @@ func Run(ctx context.Context, cfg config.Config) error {
 
 	// dns owns DB writes and stops before the deferred db.Close runs.
 	dnsSrv := dnssrv.New(dnssrv.Config{
-		Upstream:       cfg.UpstreamDNS,
-		SkipPTR:        cfg.SkipPTR,
-		Blocklist:      cfg.DoHBlocklist, // nil → built-in defaults
-		NoiseDomains:   cfg.NoiseDomains, // nil → built-in defaults
-		SearchSuffixes: cfg.SearchSuffixes,
-		DoHLogLevel:    cfg.DoHLogLevel,
-		DoHWindow:      cfg.DoHWindow,
+		Upstream:              cfg.UpstreamDNS,
+		SkipPTR:               cfg.SkipPTR,
+		Blocklist:             cfg.DoHBlocklist, // nil → built-in defaults
+		BlocklistFiles:        cfg.BlocklistFiles,
+		BlocklistURLs:         cfg.BlocklistURLs,
+		BlocklistRefreshHours: cfg.BlocklistRefreshHours,
+		NoiseDomains:          cfg.NoiseDomains, // nil → built-in defaults
+		SearchSuffixes:        cfg.SearchSuffixes,
+		DoHLogLevel:           cfg.DoHLogLevel,
+		DoHWindow:             cfg.DoHWindow,
 	}, db.DB(), slog.Default())
 	devRes := devices.New(db, slog.Default())
+	w := web.New(db, slog.Default())
+	w.Token = cfg.WebToken
+	w.RulesCount = dnsSrv.BlockedRulesCount
+
+	rules, err := db.ListCustomRules(ctx)
+	if err != nil {
+		slog.Warn("load custom rules", "err", err)
+	}
+	for _, rule := range rules {
+		dnsSrv.ApplyCustomRule(rule.Domain, rule.Action)
+	}
+	w.OnRuleChanged = func(domain, action string, deleted bool) {
+		if deleted {
+			dnsSrv.RemoveCustomRule(domain)
+			return
+		}
+		dnsSrv.ApplyCustomRule(domain, action)
+	}
+
 	dnsSrv.OnRecord = func(rec dnssrv.Record) {
 		devRes.Feed(devices.Record{ClientIP: rec.ClientIP, TS: rec.TS})
+		w.Broadcast(store.Event{
+			Kind:     store.EventDNS,
+			ClientIP: rec.ClientIP,
+			Name:     rec.Domain,
+			TS:       rec.TS,
+			Noise:    rec.Noise,
+		})
 	}
 	g.Go(func() error { return dnsSrv.Start(ctx, cfg.DNSListen) })
 	g.Go(func() error { return devRes.Start(ctx) })
-
-	// Web UI: read-only on SQLite.
-	w := web.New(db, slog.Default())
-	w.Token = cfg.WebToken
 	g.Go(func() error { return w.Start(ctx, cfg.WebListen) })
 
 	// Retention sweeps on its own schedule inside the group: g.Wait() returns

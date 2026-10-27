@@ -3,23 +3,32 @@
 package dns
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
+	"net/http"
 	"net/netip"
+	"os"
+	"path/filepath"
 	"runtime/debug"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/miekg/dns"
 	"golang.org/x/sync/errgroup"
+	"golang.org/x/sync/singleflight"
 
+	"monitor/internal/filter"
 	"monitor/internal/metrics"
 	"monitor/internal/store"
+	"monitor/internal/sysnet"
 )
 
 const upstreamTO = 2 * time.Second
@@ -55,26 +64,28 @@ var defaultNoiseDomains = []string{
 	"readaloud.googleapis.com",
 }
 
-const insertQuery = "INSERT INTO dns_log (client_ip, domain, qtype, ts, noise) VALUES (?,?,?,?,?)"
-
 type Record struct {
 	ClientIP string
 	Domain   string
 	QType    string
 	TS       int64
+	Noise    bool
 }
 
 // Config carries every tunable. Values are normalized once in New, so the
 // serve path never races field mutation ("set the field before Start" was a
 // contract nobody could enforce).
 type Config struct {
-	Upstream       string   // host:port of the upstream resolver
-	SkipPTR        bool     // answer empty NOERROR for PTR in-addr.arpa; no log/upstream
-	Blocklist      []string // non-nil replaces defaultDoHBlocklist
-	NoiseDomains   []string // non-nil replaces defaultNoiseDomains
-	SearchSuffixes []string // LAN search suffixes stripped from logged names only
-	DoHLogLevel    string   // debug|info|off for dns_blocked_doh lines
-	DoHWindow      string   // aggregation window, e.g. "10s"
+	Upstream              string   // host:port of the upstream resolver
+	SkipPTR               bool     // answer empty NOERROR for PTR in-addr.arpa; no log/upstream
+	Blocklist             []string // non-nil replaces defaultDoHBlocklist
+	BlocklistFiles        []string // hosts/adblock files merged into the blocklist
+	BlocklistURLs         []string // remote hosts/adblock lists (cached on disk)
+	BlocklistRefreshHours int      // periodic refresh; 0 disables
+	NoiseDomains          []string // non-nil replaces defaultNoiseDomains
+	SearchSuffixes        []string // LAN search suffixes stripped from logged names only
+	DoHLogLevel           string   // debug|info|off for dns_blocked_doh lines
+	DoHWindow             string   // aggregation window, e.g. "10s"
 }
 
 // Server forwards queries to upstream and records them asynchronously.
@@ -89,13 +100,22 @@ type Server struct {
 
 	// Effective lists/levels, normalized once in New (handler code reads
 	// them concurrently — never written after construction).
-	skipPTR   bool
-	blocklist []string
-	noiselist []string
-	dohLevel  slog.Level
-	window    time.Duration
-	suffixes  []string
-	aggr      *blockAggregator
+	skipPTR       bool
+	blocklist     []string
+	blockMatcher  *filter.Matcher
+	blocklistURLs []string
+	refreshEvery  time.Duration
+	noiselist     []string
+	dohLevel      slog.Level
+	window        time.Duration
+	suffixes      []string
+	aggr          *blockAggregator
+
+	udpClient *dns.Client
+	tcpClient *dns.Client
+	dohClient *http.Client
+	cache     *dnsCache
+	sf        singleflight.Group
 
 	// inflight bounds concurrent handlers (admission control; DNSInflight is
 	// the observable mirror).
@@ -114,17 +134,49 @@ func New(cfg Config, db *sql.DB, log *slog.Logger) *Server {
 	if cfg.NoiseDomains != nil {
 		noiselist = cfg.NoiseDomains
 	}
+	normalizedBlocklist := normalizeEntries(blocklist)
+	blockMatcher := filter.NewMatcher()
+	for _, entry := range normalizedBlocklist {
+		blockMatcher.Add(entry)
+	}
+	for _, path := range cfg.BlocklistFiles {
+		addBlocklistFile(blockMatcher, path, log)
+	}
+	if len(cfg.BlocklistURLs) > 0 {
+		client := &http.Client{Timeout: 30 * time.Second}
+		for _, u := range cfg.BlocklistURLs {
+			domains, err := filter.FetchURL(context.Background(), u, blocklistCacheDir, client)
+			if err != nil {
+				log.Warn("blocklist url", "url", u, "err", err)
+				continue
+			}
+			for _, domain := range domains {
+				blockMatcher.Add(domain)
+			}
+		}
+	}
+	var refreshEvery time.Duration
+	if cfg.BlocklistRefreshHours > 0 {
+		refreshEvery = time.Duration(cfg.BlocklistRefreshHours) * time.Hour
+	}
 	return &Server{
-		upstream:  cfg.Upstream,
-		log:       log,
-		snk:       store.NewSink(db, log, insertQuery),
-		skipPTR:   cfg.SkipPTR,
-		blocklist: normalizeEntries(blocklist),
-		noiselist: normalizeEntries(noiselist),
-		dohLevel:  dohLevel(cfg.DoHLogLevel),
-		window:    parseWindow(cfg.DoHWindow, 10*time.Second, log),
-		suffixes:  normalizeEntries(cfg.SearchSuffixes),
-		aggr:      newBlockAggregator(dohLevel(cfg.DoHLogLevel), log),
+		upstream:      cfg.Upstream,
+		log:           log,
+		snk:           store.NewSink(db, log, ""),
+		skipPTR:       cfg.SkipPTR,
+		blocklist:     normalizedBlocklist,
+		blockMatcher:  blockMatcher,
+		blocklistURLs: cfg.BlocklistURLs,
+		refreshEvery:  refreshEvery,
+		noiselist:     normalizeEntries(noiselist),
+		dohLevel:      dohLevel(cfg.DoHLogLevel),
+		window:        parseWindow(cfg.DoHWindow, 10*time.Second, log),
+		suffixes:      normalizeEntries(cfg.SearchSuffixes),
+		aggr:          newBlockAggregator(dohLevel(cfg.DoHLogLevel), log),
+		udpClient:     &dns.Client{Timeout: upstreamTO, Net: "udp"},
+		tcpClient:     &dns.Client{Timeout: upstreamTO, Net: "tcp"},
+		dohClient:     &http.Client{Timeout: upstreamTO},
+		cache:         newDNSCache(10000),
 	}
 }
 
@@ -142,15 +194,52 @@ func normalizeEntries(list []string) []string {
 	return out
 }
 
-// isBlocked: exact or subdomain (suffix) match against the list.
-func (s *Server) isBlocked(name string) bool {
-	name = strings.ToLower(strings.TrimSuffix(name, "."))
-	for _, e := range s.blocklist {
-		if name == e || strings.HasSuffix(name, "."+e) {
-			return true
-		}
+// addBlocklistFile parses one hosts/adblock/plain file into m. A broken file
+// is logged and skipped: blocking the whole DNS server over it is worse.
+func addBlocklistFile(m *filter.Matcher, path string, log *slog.Logger) {
+	f, err := os.Open(path)
+	if err != nil {
+		log.Warn("blocklist file open", "path", path, "err", err)
+		return
 	}
-	return false
+	defer func() {
+		if cerr := f.Close(); cerr != nil {
+			log.Warn("blocklist file close", "path", path, "err", cerr)
+		}
+	}()
+	domains, err := filter.Parse(f)
+	if err != nil {
+		log.Warn("blocklist file parse", "path", path, "err", err)
+		return
+	}
+	for _, domain := range domains {
+		m.Add(domain)
+	}
+}
+
+// BlockedRulesCount returns the number of unique domains in the blocklist.
+func (s *Server) BlockedRulesCount() int {
+	return s.blockMatcher.Count()
+}
+
+// ApplyCustomRule adds a runtime block or allow override.
+func (s *Server) ApplyCustomRule(domain, action string) {
+	switch action {
+	case store.RuleBlock:
+		s.blockMatcher.Add(domain)
+	case store.RuleAllow:
+		s.blockMatcher.AddAllow(domain)
+	}
+}
+
+// RemoveCustomRule drops a runtime override from both rule sets.
+func (s *Server) RemoveCustomRule(domain string) {
+	s.blockMatcher.RemoveRule(domain)
+}
+
+// isBlocked reports whether name is in the blocklist (exact or parent domain).
+func (s *Server) isBlocked(name string) bool {
+	return s.blockMatcher.Match(name)
 }
 
 // isNoise: pattern match against the noise list. Patterns:
@@ -195,10 +284,81 @@ func (s *Server) Start(ctx context.Context, addr string) error {
 	sinkDone := make(chan error, 1)
 	go func() { sinkDone <- s.snk.Start(sctx) }()
 
+	var refreshDone chan struct{}
+	if s.refreshEvery > 0 && len(s.blocklistURLs) > 0 {
+		refreshDone = make(chan struct{})
+		go func() {
+			defer close(refreshDone)
+			s.refreshLoop(sctx)
+		}()
+	}
+
+	usedAddr := addr
+	err := s.serveListeners(sctx, usedAddr)
+	// Windows: ICS/WSL often owns 0.0.0.0:53 while the LAN interface is free.
+	// Bind on the concrete LAN address instead of giving up entirely.
+	if err != nil && isAddrInUse(err) && isWildcardAddr(addr) {
+		if lanIP := sysnet.OutboundLANIP(); lanIP != "" && lanIP != "127.0.0.1" {
+			fallbackAddr := net.JoinHostPort(lanIP, "53")
+			s.log.Warn("dns 0.0.0.0:53 busy, falling back to LAN IP", "lan_addr", fallbackAddr)
+			usedAddr = fallbackAddr
+			err = s.serveListeners(sctx, fallbackAddr)
+		}
+	}
+	cancel() // sink and refresh stop via sctx.Done
+	if refreshDone != nil {
+		<-refreshDone
+	}
+	sinkErr := <-sinkDone // drain+flush finished — safe for caller to close the DB
+	if err != nil && !errors.Is(err, context.Canceled) {
+		return fmt.Errorf("dns serve %s: %w", usedAddr, err)
+	}
+	if sinkErr != nil && !errors.Is(sinkErr, context.Canceled) {
+		return fmt.Errorf("sink: %w", sinkErr)
+	}
+	return nil
+}
+
+// blocklistCacheDir keeps downloaded lists across restarts for offline use.
+var blocklistCacheDir = filepath.Join(".", ".cache", "blocklists")
+
+// refreshLoop periodically re-downloads remote blocklists until ctx is done.
+func (s *Server) refreshLoop(ctx context.Context) {
+	t := time.NewTicker(s.refreshEvery)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			s.refreshBlocklists(ctx)
+		}
+	}
+}
+
+// refreshBlocklists fetches every configured URL and merges new domains into
+// the live matcher (existing rules are never removed: fail-open on shrink).
+func (s *Server) refreshBlocklists(ctx context.Context) {
+	client := &http.Client{Timeout: 30 * time.Second}
+	for _, u := range s.blocklistURLs {
+		domains, err := filter.FetchURL(ctx, u, blocklistCacheDir, client)
+		if err != nil {
+			s.log.Warn("blocklist url refresh", "url", u, "err", err)
+			continue
+		}
+		for _, domain := range domains {
+			s.blockMatcher.Add(domain)
+		}
+	}
+}
+
+// serveListeners runs the UDP+TCP listeners and the block-log flusher until
+// ctx is done or one listener fails.
+func (s *Server) serveListeners(ctx context.Context, addr string) error {
 	udp := &dns.Server{Addr: addr, Net: "udp", Handler: dns.HandlerFunc(s.handle)}
 	tcp := &dns.Server{Addr: addr, Net: "tcp", Handler: dns.HandlerFunc(s.handle)}
 
-	eg, egctx := errgroup.WithContext(sctx)
+	eg, egctx := errgroup.WithContext(ctx)
 	for _, srv := range []*dns.Server{udp, tcp} {
 		srv := srv
 		eg.Go(func() error { return serve(egctx, srv) })
@@ -218,16 +378,23 @@ func (s *Server) Start(ctx context.Context, addr string) error {
 			}
 		}
 	})
-	err := eg.Wait()
-	cancel()              // sink exits via sctx.Done
-	sinkErr := <-sinkDone // drain+flush finished — safe for caller to close the DB
-	if err != nil && !errors.Is(err, context.Canceled) {
-		return fmt.Errorf("dns serve %s: %w", addr, err)
+	return eg.Wait()
+}
+
+// isWildcardAddr reports whether a listen address covers every interface.
+func isWildcardAddr(addr string) bool {
+	return addr == ":53" || strings.HasPrefix(addr, "0.0.0.0:")
+}
+
+// isAddrInUse recognizes a bind conflict, including the localized Windows
+// message ("только одно использование") seen under a non-English locale.
+func isAddrInUse(err error) bool {
+	if errors.Is(err, syscall.EADDRINUSE) {
+		return true
 	}
-	if sinkErr != nil && !errors.Is(sinkErr, context.Canceled) {
-		return fmt.Errorf("sink: %w", sinkErr)
-	}
-	return nil
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "address already in use") ||
+		strings.Contains(msg, "только одно использование")
 }
 
 // serve runs one listener (ListenAndServe creates the socket from Addr) and
@@ -246,9 +413,14 @@ func serve(ctx context.Context, srv *dns.Server) error {
 		return nil
 	case <-ctx.Done():
 		// WithoutCancel: shutdown must finish even though the group ctx that
-		// triggered it is already canceled.
-		if err := srv.ShutdownContext(context.WithoutCancel(ctx)); err != nil {
+		// triggered it is already canceled, but bounded with a strict timeout.
+		sctx, scancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+		defer scancel()
+		if err := srv.ShutdownContext(sctx); err != nil {
 			return fmt.Errorf("shutdown %s: %w", srv.Net, err)
+		}
+		if waitErr := <-errCh; waitErr != nil && !errors.Is(waitErr, net.ErrClosed) {
+			return fmt.Errorf("listener %s: %w", srv.Net, waitErr)
 		}
 		return nil
 	}
@@ -314,6 +486,7 @@ func (s *Server) handle(w dns.ResponseWriter, r *dns.Msg) {
 	} else {
 		s.log.Info("dns query", "client", srcIP, "domain", domain, "qtype", dns.TypeToString[q.Qtype], "ts", ts)
 	}
+	rec.Noise = noisy || blocked
 	if s.OnRecord != nil {
 		s.OnRecord(rec)
 	}
@@ -321,12 +494,19 @@ func (s *Server) handle(w dns.ResponseWriter, r *dns.Msg) {
 	if noisy || blocked {
 		noiseFlag = 1 // blocked DoH attempts are noise in the feed, too
 	}
-	if !s.snk.TrySend(srcIP, domain, dns.TypeToString[q.Qtype], ts, noiseFlag) {
+	if !s.snk.TrySend(store.DNSRow{
+		ClientIP: srcIP,
+		Domain:   domain,
+		QType:    dns.TypeToString[q.Qtype],
+		TS:       ts,
+		Noise:    noiseFlag,
+	}) {
 		// Overflow is dropped instead of stalling the serve loop — and counted.
 		metrics.LogRowsRejectedTotal.Add(1)
 		s.log.Warn("dns queue full, record dropped", "client", srcIP, "domain", domain)
 	}
 	if blocked {
+		metrics.DNSBlockedTotal.Add(1)
 		// DoH endpoints are answered NXDOMAIN here; the request itself is
 		// aggregated: one dns_blocked_doh line per (client, domain) per window.
 		s.aggr.add(srcIP, domain)
@@ -346,22 +526,88 @@ func (s *Server) handle(w dns.ResponseWriter, r *dns.Msg) {
 	_ = w.WriteMsg(resp)
 }
 
-// exchange creates a client per query: dns.Client is not documented as safe for concurrent use.
 func (s *Server) exchange(r *dns.Msg) (resp *dns.Msg, err error) {
-	q := new(dns.Msg)
-	q.SetQuestion(r.Question[0].Name, r.Question[0].Qtype)
-	q.RecursionDesired = true
+	q := r.Question[0]
+	cacheKey := fmt.Sprintf("%s:%d", strings.ToLower(strings.TrimSuffix(q.Name, ".")), q.Qtype)
 
-	// TCP fallback: truncated or lost UDP answer retried once over TCP.
-	resp, _, err = (&dns.Client{Timeout: upstreamTO, Net: "udp"}).Exchange(q, s.upstream)
+	if cached := s.cache.Get(q.Name, q.Qtype); cached != nil {
+		return cached, nil
+	}
+
+	val, err, _ := s.sf.Do(cacheKey, func() (any, error) {
+		if cached := s.cache.Get(q.Name, q.Qtype); cached != nil {
+			return cached, nil
+		}
+		res, upErr := s.resolveUpstream(q)
+		if upErr != nil {
+			return nil, upErr
+		}
+		if res.Rcode == dns.RcodeSuccess || res.Rcode == dns.RcodeNameError {
+			s.cache.Set(q.Name, q.Qtype, res)
+		}
+		return res, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	msg, ok := val.(*dns.Msg)
+	if !ok || msg == nil {
+		return nil, errors.New("upstream: empty response")
+	}
+	return msg.Copy(), nil
+}
+
+func (s *Server) resolveUpstream(q dns.Question) (*dns.Msg, error) {
+	msg := new(dns.Msg)
+	msg.SetQuestion(q.Name, q.Qtype)
+	msg.RecursionDesired = true
+
+	if strings.HasPrefix(s.upstream, "https://") || strings.HasPrefix(s.upstream, "http://") {
+		return s.exchangeDoH(msg)
+	}
+
+	// UDP with TCP fallback
+	resp, _, err := s.udpClient.Exchange(msg, s.upstream)
 	if err != nil || (resp != nil && resp.Truncated) {
-		resp, _, err = (&dns.Client{Timeout: upstreamTO, Net: "tcp"}).Exchange(q, s.upstream)
+		resp, _, err = s.tcpClient.Exchange(msg, s.upstream)
 	}
 	if err != nil {
 		return nil, err
 	}
 	if resp == nil {
 		return nil, errors.New("upstream: empty response")
+	}
+	return resp, nil
+}
+
+func (s *Server) exchangeDoH(msg *dns.Msg) (*dns.Msg, error) {
+	wire, err := msg.Pack()
+	if err != nil {
+		return nil, fmt.Errorf("pack doh query: %w", err)
+	}
+	req, err := http.NewRequest(http.MethodPost, s.upstream, bytes.NewReader(wire))
+	if err != nil {
+		return nil, fmt.Errorf("create doh req: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/dns-message")
+	req.Header.Set("Accept", "application/dns-message")
+
+	httpResp, err := s.dohClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("doh upstream: %w", err)
+	}
+	defer func() { _ = httpResp.Body.Close() }()
+
+	if httpResp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("doh upstream status %d", httpResp.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(httpResp.Body, 65536))
+	if err != nil {
+		return nil, fmt.Errorf("read doh resp: %w", err)
+	}
+	resp := new(dns.Msg)
+	if err := resp.Unpack(body); err != nil {
+		return nil, fmt.Errorf("unpack doh resp: %w", err)
 	}
 	return resp, nil
 }

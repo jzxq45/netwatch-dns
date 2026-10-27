@@ -23,11 +23,12 @@ import (
 
 	"monitor/internal/app"
 	"monitor/internal/config"
+	"monitor/internal/sysnet"
 )
 
 // netwatch.exe: the same monitor server, wrapped in a desktop window.
-// Closing the window performs the graceful shutdown (DNS stops, sink flushes,
-// DB closes) — there is no hidden background process left behind.
+// Closing the window hides it to the system tray; "Выход" in the tray menu
+// performs the graceful shutdown (DNS stops, sink flushes, DB closes).
 func main() {
 	os.Exit(run())
 }
@@ -44,6 +45,10 @@ func run() int {
 		alert("netwatch-dns", "Config error:\n"+err.Error())
 		return 1
 	}
+
+	if err := sysnet.EnsureFirewallRules(); err != nil {
+		slog.Warn("firewall rules", "err", err)
+	}
 	webURL, err := localWebURL(cfg.WebListen)
 	if err != nil {
 		alert("netwatch-dns", "Bad web_listen: "+err.Error())
@@ -58,10 +63,14 @@ func run() int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	appErr := make(chan error, 1)
-	go func() { appErr <- app.Run(ctx, cfg) }()
+	appDone := make(chan struct{})
+	var appErr error
+	go func() {
+		appErr = app.Run(ctx, cfg)
+		close(appDone)
+	}()
 
-	if err := waitWebUp(webURL, 5*time.Second, appErr); err != nil {
+	if err := waitWebUp(webURL, 5*time.Second, appDone, func() error { return appErr }); err != nil {
 		alert("netwatch-dns", "Server failed to start:\n"+err.Error())
 		return 1
 	}
@@ -88,35 +97,43 @@ func run() int {
 				"Install it from https://aka.ms/webview2 to get the desktop window.\n"+
 				"Servers keep running; Ctrl+C in a console session (or kill netwatch.exe) stops everything.")
 		select {
-		case err := <-appErr:
-			if err != nil {
-				alert("netwatch-dns", "Server error: "+err.Error())
+		case <-appDone:
+			if appErr != nil {
+				alert("netwatch-dns", "Server error: "+appErr.Error())
 				return 1
 			}
 		case <-ctx.Done():
-			_ = <-appErr // shutting down anyway; the error no longer matters
+			<-appDone // wait for graceful exit
 		}
 		return 0
 	}
 	defer w.Destroy()
+
+	// Tray icon + close-to-tray intercept: X hides the window, the tray menu
+	// restores it or terminates the whole app.
+	hwnd := uintptr(w.Window())
+	cleanupTray := setupTray(hwnd, func() { w.Terminate() })
+	defer cleanupTray()
+	interceptCloseToTray(hwnd)
+
 	w.Navigate(webURL)
 	// Fatal app error (e.g. port grabbed between the health check and now)
 	// must not leave a dead window on screen: terminate it immediately.
 	go func() {
 		select {
-		case _ = <-appErr:
+		case <-appDone:
 			w.Terminate()
 		case <-ctx.Done():
 		}
 	}()
 	w.Run()
 
-	// Window closed → graceful stop of the whole stack.
+	// Window closed or tray "Выход" → graceful stop of the whole stack.
 	stop()
 	select {
-	case err := <-appErr:
-		if err != nil {
-			alert("netwatch-dns", "Server stopped with error:\n"+err.Error())
+	case <-appDone:
+		if appErr != nil {
+			alert("netwatch-dns", "Server stopped with error:\n"+appErr.Error())
 			return 1
 		}
 	case <-time.After(10 * time.Second):
@@ -128,7 +145,7 @@ func run() int {
 
 // waitWebUp polls /healthz so the window never shows a blank page on a
 // half-bound port; a fatal app error (e.g. DNS bind failure) fails fast.
-func waitWebUp(webURL string, d time.Duration, appErr <-chan error) error {
+func waitWebUp(webURL string, d time.Duration, appDone <-chan struct{}, getErr func() error) error {
 	addr := strings.TrimSuffix(webURL, "/") + "/healthz"
 	hc := &http.Client{Timeout: time.Second}
 	deadline := time.Now().Add(d)
@@ -141,8 +158,11 @@ func waitWebUp(webURL string, d time.Duration, appErr <-chan error) error {
 			}
 		}
 		select {
-		case err := <-appErr:
-			return err
+		case <-appDone:
+			if err := getErr(); err != nil {
+				return err
+			}
+			return fmt.Errorf("server exited unexpectedly")
 		default:
 		}
 		if time.Now().After(deadline) {
