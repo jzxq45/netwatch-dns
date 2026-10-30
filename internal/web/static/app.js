@@ -54,6 +54,8 @@
     var errBox = document.getElementById('localDnsError');
     var valBlockedQueries = document.getElementById('valBlockedQueries');
     var valBlockedRules = document.getElementById('valBlockedRules');
+    var valCacheRatio = document.getElementById('valCacheRatio');
+    var valBlockPct = document.getElementById('valBlockPct');
     var btnPhonePair = document.getElementById('btnPhonePair');
     var phonePairCard = document.getElementById('phonePairCard');
     var phonePairAddr = document.getElementById('phonePairAddr');
@@ -104,6 +106,15 @@
           phonePairAddr.textContent = 'http://' + lanIp + (window.location.port ? ':' + window.location.port : '');
         }
         setupCard.style.display = 'block';
+      })
+      .catch(function () {});
+
+    // Caps: 24h block percentage and lifetime cache hit ratio from /api/stats.
+    fetch('/api/stats')
+      .then(function (r) { return r.json(); })
+      .then(function (stats) {
+        if (valBlockPct) valBlockPct.textContent = Math.round(stats.block_pct || 0);
+        if (valCacheRatio) valCacheRatio.textContent = Math.round(stats.cache_hit_ratio || 0);
       })
       .catch(function () {});
 

@@ -117,8 +117,10 @@ func TestDoHBlockedLogEmitted(t *testing.T) {
 	var logs syncBuffer
 	log := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
-	// Default blocklist (Blocklist stays nil), short window for fast flush.
-	srv := New(Config{Upstream: up, DoHWindow: "50ms", DoHLogLevel: "debug"}, db.DB(), log)
+	// Default blocklist (Blocklist stays nil). The window is wide enough
+	// that the two test queries always share one aggregation window even
+	// under -race scheduler pauses; the test then waits for the flush.
+	srv := New(Config{Upstream: up, DoHWindow: "2s", DoHLogLevel: "debug"}, db.DB(), log)
 
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -158,8 +160,8 @@ func TestDoHBlockedLogEmitted(t *testing.T) {
 		t.Fatalf("blocked query reached upstream %d times", forwarded)
 	}
 
-	// Exactly one aggregated line with count=2 after the 50ms window.
-	deadline := time.Now().Add(2 * time.Second)
+	// Exactly one aggregated line with count=2 after the flush window.
+	deadline := time.Now().Add(5 * time.Second)
 	for {
 		s := logs.String()
 		if strings.Contains(s, "msg=dns_blocked_doh") && strings.Contains(s, "count=2") {

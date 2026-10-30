@@ -53,7 +53,7 @@ func TestFallbackUpstreamRescuesPrimaryFailure(t *testing.T) {
 		FallbackUpstream: fallbackAddr,
 	}, nil, slogDiscard())
 
-	resp, err := s.resolveUpstream(qA("example.com."))
+	resp, err := s.resolveUpstream(qA("example.com."), 0)
 	if err != nil {
 		t.Fatalf("resolveUpstream with fallback: %v", err)
 	}
@@ -76,7 +76,7 @@ func TestFallbackUpstreamBothFail(t *testing.T) {
 		FallbackUpstream: dead2,
 	}, nil, discardLogger())
 
-	if _, err := s.resolveUpstream(qA("example.com.")); err == nil {
+	if _, err := s.resolveUpstream(qA("example.com."), 0); err == nil {
 		t.Fatal("expected error when both upstreams fail")
 	}
 	if got := s.consecutiveFails.Load(); got < 1 {
@@ -93,7 +93,7 @@ func TestFallbackUpstreamDisabled(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		_, err := s.resolveUpstream(qA("example.com."))
+		_, err := s.resolveUpstream(qA("example.com."), 0)
 		done <- err
 	}()
 	select {

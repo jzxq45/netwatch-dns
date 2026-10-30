@@ -46,6 +46,7 @@ type Store interface {
 	DeviceEvents(ctx context.Context, ip string, limit int) ([]store.Event, error)
 	ListDevices(ctx context.Context) ([]store.DeviceRow, error)
 	TopDomains(ctx context.Context, sinceTS int64, limit int) ([]store.TopRow, error)
+	Stats24h(ctx context.Context) (store.StatsSummary, error)
 	SetDeviceHostname(ctx context.Context, ip string, hostname string) error
 	ListCustomRules(ctx context.Context) ([]store.CustomRule, error)
 	SetCustomRule(ctx context.Context, domain string, action string) error
@@ -85,6 +86,7 @@ func New(st Store, log *slog.Logger) *Server {
 	mux.HandleFunc("GET /top", s.top)
 	mux.HandleFunc("GET /static/", s.static)
 	mux.HandleFunc("GET /api/events", s.apiEvents)
+	mux.HandleFunc("GET /api/stats", s.apiStats)
 	mux.HandleFunc("GET /api/events/stream", s.apiEventsStream)
 	mux.HandleFunc("GET /api/export", s.apiExport)
 	mux.HandleFunc("GET /api/activity", s.apiActivity)
@@ -100,6 +102,9 @@ func New(st Store, log *slog.Logger) *Server {
 	// expvar counters/gauges (drops, in-flight, refused) — gated by token auth
 	// when web_token is set, like every non-exception route.
 	mux.Handle("GET /metrics", expvar.Handler())
+	// Prometheus text exposition for the same counters (scrape-friendly =
+	// no JSON parsing on the collector side).
+	mux.HandleFunc("GET /metrics/prometheus", s.prometheusMetrics)
 	return s
 }
 
@@ -322,6 +327,8 @@ const contentFeed = `
       <a class="chip link" id="btnOpenRouter" target="_blank" href="#">↗ Роутер</a>
       <button class="chip link" id="btnPhonePair" style="cursor:pointer">📱 Телефон</button>
       <div class="chip" id="lblBlockStats" title="Активная защита от рекламы и вредоносных доменов">🛡️ Защита: <span id="valBlockedQueries">0</span> угроз (<span id="valBlockedRules">0</span> правил)</div>
+      <div class="chip" id="lblCacheStats" title="Доля доменов, отвеченных из локального кэша за всё время">💾 Кэш: <span id="valCacheRatio">0</span>%</div>
+      <div class="chip" id="lblStatStats" title="Доля заблокированных запросов за 24 часа (по /api/stats)">🚫 Блок: <span id="valBlockPct">0</span>%</div>
     </div>
   </div>
   <div id="localDnsError" style="color:#ff8080;font-size:.82rem;margin-top:.4rem;display:none"></div>
@@ -750,6 +757,72 @@ func (s *Server) apiEvents(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewEncoder(w).Encode(events); err != nil { //nolint:errcheck // client may vanish mid-write
 		s.log.Debug("api events write", "err", err)
 	}
+}
+
+// apiStats serves the 24h summary (PI-hole-style dashboard numbers):
+// total/blocked queries, block percentage, cache ratio from expvar
+// counters and the active device count.
+func (s *Server) apiStats(w http.ResponseWriter, r *http.Request) {
+	sum, err := s.st.Stats24h(r.Context())
+	if err != nil {
+		s.fail(w, "api stats", err)
+		return
+	}
+	blockPct := 0.0
+	if sum.Total > 0 {
+		blockPct = float64(sum.Blocked) * 100 / float64(sum.Total)
+	}
+	hits := metrics.DNSCacheHitsTotal.Value()
+	misses := metrics.DNSCacheMissesTotal.Value()
+	cacheRatio := 0.0
+	if hits+misses > 0 {
+		cacheRatio = float64(hits) * 100 / float64(hits+misses)
+	}
+	out := struct {
+		store.StatsSummary
+		BlockPct      float64 `json:"block_pct"`
+		CacheHits     int64   `json:"cache_hits"`
+		CacheMisses   int64   `json:"cache_misses"`
+		CacheHitRatio float64 `json:"cache_hit_ratio"`
+	}{
+		StatsSummary:  sum,
+		BlockPct:      blockPct,
+		CacheHits:     hits,
+		CacheMisses:   misses,
+		CacheHitRatio: cacheRatio,
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(out) //nolint:errcheck // client may vanish mid-write
+}
+
+// prometheusMetric is one exposition row of /metrics/prometheus.
+type prometheusMetric struct {
+	name  string
+	help  string
+	typ   string // "counter" | "gauge"
+	value int64
+}
+
+// prometheusMetrics renders expvar counters in the Prometheus text format
+// (# HELP / # TYPE per metric) so standard collectors need no custom query.
+func (s *Server) prometheusMetrics(w http.ResponseWriter, _ *http.Request) {
+	list := []prometheusMetric{
+		{"dns_cache_hits_total", "DNS queries answered from local cache.", "counter", metrics.DNSCacheHitsTotal.Value()},
+		{"dns_cache_misses_total", "DNS queries forwarded to an upstream resolver.", "counter", metrics.DNSCacheMissesTotal.Value()},
+		{"dns_blocked_total", "DNS queries answered with NXDOMAIN by a blocklist match.", "counter", metrics.DNSBlockedTotal.Value()},
+		{"dns_refused_total", "DNS queries refused (admission control / open-resolver ACL).", "counter", metrics.DNSRefusedTotal.Value()},
+		{"dns_inflight", "DNS queries currently pending an upstream answer.", "gauge", metrics.DNSInflight.Value()},
+		{"dns_log_rows_rejected_total", "Serve-path DNS rows dropped because the writer queue was full.", "counter", metrics.LogRowsRejectedTotal.Value()},
+		{"dns_blocklog_capped_total", "Block-log window entries dropped by the per-window key cap.", "counter", metrics.BlockAggrCapTotal.Value()},
+		{"devices_sightings_dropped_total", "Device sightings dropped because the resolver queue was full.", "counter", metrics.DevicesDroppedTotal.Value()},
+		{"sink_rows_dropped_total", "Accepted log rows irreversibly lost to repeated DB failures.", "counter", metrics.SinkRowsDroppedTotal.Value()},
+	}
+	var buf bytes.Buffer
+	for _, m := range list {
+		fmt.Fprintf(&buf, "# HELP %s %s\n# TYPE %s %s\n%s %d\n", m.name, m.help, m.name, m.typ, m.name, m.value)
+	}
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	_, _ = w.Write(buf.Bytes())
 }
 
 func (s *Server) apiNetwork(w http.ResponseWriter, _ *http.Request) {

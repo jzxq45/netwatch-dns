@@ -5,11 +5,13 @@ import (
 	"net"
 	"path/filepath"
 	"runtime"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/miekg/dns"
 
+	"monitor/internal/metrics"
 	"monitor/internal/store"
 )
 
@@ -189,4 +191,228 @@ func TestServerLogsQuery(t *testing.T) {
 		}
 		return n >= 1
 	})
+}
+
+// TestEDNSBufferSizeClamp pins the RFC 6891 + DNS Flag Day 2020 contract:
+// the client's advertised EDNS0 UDP size is preserved downstream, clamped
+// into [512..1232]; a query without EDNS0 must not grow one.
+func TestEDNSBufferSizeClamp(t *testing.T) {
+	t.Parallel()
+	if got := clampEDNSUDP(4096); got != 1232 {
+		t.Errorf("clampEDNSUDP(4096) = %d, want 1232", got)
+	}
+	if got := clampEDNSUDP(1000); got != 1000 {
+		t.Errorf("clampEDNSUDP(1000) = %d, want 1000", got)
+	}
+	if got := clampEDNSUDP(256); got != 512 {
+		t.Errorf("clampEDNSUDP(256) = %d, want 512", got)
+	}
+	if got := clampEDNSUDP(0); got != 0 {
+		t.Errorf("clampEDNSUDP(0) = %d, want 0 (no EDNS0 advertised)", got)
+	}
+}
+
+// TestUpstreamPreservesClampedEDNS sends a query with EDNS0 4096 and checks
+// the upstream received the client's size clamped to 1232.
+func TestUpstreamPreservesClampedEDNS(t *testing.T) {
+	t.Parallel()
+	var seen atomic.Int64
+	up := startUpstream(t, dns.HandlerFunc(func(w dns.ResponseWriter, r *dns.Msg) {
+		if opt := r.IsEdns0(); opt != nil {
+			seen.Store(int64(opt.UDPSize()))
+		}
+		m := new(dns.Msg)
+		m.SetReply(r)
+		m.Answer = append(m.Answer, &dns.A{
+			Hdr: dns.RR_Header{Name: r.Question[0].Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 300},
+			A:   net.IPv4(93, 184, 216, 34).To4(),
+		})
+		if err := w.WriteMsg(m); err != nil {
+			t.Errorf("upstream write: %v", err)
+		}
+	}))
+
+	db, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("store open: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := db.Close(); err != nil {
+			t.Errorf("db close: %v", err)
+		}
+	})
+	srv := New(Config{Upstream: up}, db.DB(), nil)
+
+	q := dns.Question{Name: "edns.example.com.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
+	m := new(dns.Msg)
+	m.SetQuestion(q.Name, q.Qtype)
+	m.SetEdns0(4096, false) // client advertises 4096
+	if _, err := srv.exchange(m); err != nil {
+		t.Fatalf("exchange: %v", err)
+	}
+	if got := seen.Load(); got != 1232 {
+		t.Fatalf("upstream saw EDNS0 size %d, want 1232", got)
+	}
+}
+
+// TestUpstreamNoEDNSWhenClientPlain: a client query without EDNS0 must not
+// grow an OPT record on the upstream query.
+func TestUpstreamNoEDNSWhenClientPlain(t *testing.T) {
+	t.Parallel()
+	hadOPT := atomic.Bool{}
+	up := startUpstream(t, dns.HandlerFunc(func(w dns.ResponseWriter, r *dns.Msg) {
+		if r.IsEdns0() != nil {
+			hadOPT.Store(true)
+		}
+		m := new(dns.Msg)
+		m.SetReply(r)
+		if err := w.WriteMsg(m); err != nil {
+			t.Errorf("upstream write: %v", err)
+		}
+	}))
+	db, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("store open: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := db.Close(); err != nil {
+			t.Errorf("db close: %v", err)
+		}
+	})
+	srv := New(Config{Upstream: up}, db.DB(), nil)
+
+	m := new(dns.Msg)
+	m.SetQuestion("plain.example.com.", dns.TypeA)
+	if _, err := srv.exchange(m); err != nil {
+		t.Fatalf("exchange: %v", err)
+	}
+	if hadOPT.Load() {
+		t.Fatal("upstream saw an unrequested EDNS0 record")
+	}
+}
+
+// TestExchangeCacheCounters: first lookup is a miss, the second a hit �
+// expvar counters move exactly that way.
+func TestExchangeCacheCounters(t *testing.T) {
+	t.Parallel()
+	up := startUpstream(t, dns.HandlerFunc(func(w dns.ResponseWriter, r *dns.Msg) {
+		m := new(dns.Msg)
+		m.SetReply(r)
+		m.Answer = append(m.Answer, &dns.A{
+			Hdr: dns.RR_Header{Name: r.Question[0].Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 300},
+			A:   net.IPv4(93, 184, 216, 34).To4(),
+		})
+		if err := w.WriteMsg(m); err != nil {
+			t.Errorf("upstream write: %v", err)
+		}
+	}))
+	db, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("store open: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := db.Close(); err != nil {
+			t.Errorf("db close: %v", err)
+		}
+	})
+	srv := New(Config{Upstream: up}, db.DB(), nil)
+
+	m := new(dns.Msg)
+	m.SetQuestion("counter.example.com.", dns.TypeA)
+	if _, err := srv.exchange(m); err != nil {
+		t.Fatalf("first exchange: %v", err)
+	}
+	missesAfter := metrics.DNSCacheMissesTotal.Value()
+	if missesAfter == 0 {
+		t.Fatal("miss counter did not move")
+	}
+
+	if _, err := srv.exchange(m); err != nil {
+		t.Fatalf("second exchange: %v", err)
+	}
+	hitsAfter := metrics.DNSCacheHitsTotal.Value()
+	if hitsAfter == 0 {
+		t.Fatal("hit counter did not move")
+	}
+}
+
+// upstreamHits counts upstream exchanges for the prefetch test.
+type upstreamHits struct{ n atomic.Int64 }
+
+// TestExchangePrefetchRefresh: a cached entry with <15s left is served
+// immediately AND triggers exactly one background upstream refresh.
+func TestExchangePrefetchRefresh(t *testing.T) {
+	t.Parallel()
+	hits := &upstreamHits{}
+	up := startUpstream(t, dns.HandlerFunc(func(w dns.ResponseWriter, r *dns.Msg) {
+		hits.n.Add(1)
+		m := new(dns.Msg)
+		m.SetReply(r)
+		m.Answer = append(m.Answer, &dns.A{
+			Hdr: dns.RR_Header{Name: r.Question[0].Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 300},
+			A:   net.IPv4(93, 184, 216, 34).To4(),
+		})
+		if err := w.WriteMsg(m); err != nil {
+			t.Errorf("upstream write: %v", err)
+		}
+	}))
+	db, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("store open: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := db.Close(); err != nil {
+			t.Errorf("db close: %v", err)
+		}
+	})
+	srv := New(Config{Upstream: up}, db.DB(), nil)
+
+	// Seed a hot entry manually: cached long ago, alive for 8 more seconds.
+	m := new(dns.Msg)
+	m.SetQuestion("hot-refresh.example.com.", dns.TypeA)
+	m.Rcode = dns.RcodeSuccess
+	m.Answer = []dns.RR{
+		&dns.A{
+			Hdr: dns.RR_Header{Name: "hot-refresh.example.com.", Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 30},
+			A:   net.IPv4(93, 184, 216, 34).To4(),
+		},
+	}
+	key := srv.cache.key("hot-refresh.example.com.", dns.TypeA)
+	srv.cache.mu.Lock()
+	srv.cache.entries[key] = cacheEntry{
+		msg:       m.Copy(),
+		cachedAt:  time.Now().Add(-60 * time.Second),
+		expiresAt: time.Now().Add(8 * time.Second),
+	}
+	srv.cache.mu.Unlock()
+
+	resp, err := srv.exchange(m)
+	if err != nil {
+		t.Fatalf("exchange on hot entry: %v", err)
+	}
+	if resp == nil || len(resp.Answer) == 0 {
+		t.Fatal("expected the cached answer immediately")
+	}
+
+	// The prefetch goroutine must refresh the entry upstream without
+	// blocking the answer above: one upstream exchange, and the cache entry
+	// re-stored with its fresh TTL (the upstream answers 300s).
+	poll(t, 2*time.Second, func() bool {
+		if hits.n.Load() < 1 {
+			return false
+		}
+		srv.cache.mu.RLock()
+		entry := srv.cache.entries[key]
+		srv.cache.mu.RUnlock()
+		return time.Until(entry.expiresAt) > 30*time.Second
+	})
+
+	// The refreshed value is now served from the cache — no extra upstream.
+	before := hits.n.Load()
+	if _, err := srv.exchange(m); err != nil {
+		t.Fatalf("exchange after refresh: %v", err)
+	}
+	if after := hits.n.Load(); after != before {
+		t.Fatalf("refreshed entry not served from cache: upstream hits %d -> %d", before, after)
+	}
 }

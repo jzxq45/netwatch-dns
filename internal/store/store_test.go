@@ -4,6 +4,7 @@ import (
 	"context"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestCustomRules(t *testing.T) {
@@ -80,6 +81,82 @@ func TestCustomRules(t *testing.T) {
 	}
 	if len(rules) != 1 || rules[0].Domain != "safe.example.com" {
 		t.Fatalf("rules after delete = %v, want only safe.example.com", rules)
+	}
+}
+
+func TestStats24h(t *testing.T) {
+	t.Parallel()
+	s, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("store open: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+
+	now := time.Now().Unix()
+	seed := []struct {
+		ip     string
+		domain string
+		ts     int64
+		noise  int
+	}{
+		{"192.168.1.10", "example.com.", now - 60, 0},
+		{"192.168.1.10", "ads.example.com.", now - 50, 1},
+		{"192.168.1.11", "example.com.", now - 40, 0},
+		{"192.168.1.12", "other.example.net.", now - 30, 0},
+		// Outside the 24h window: must not be counted at all.
+		{"192.168.1.13", "old.example.org.", now - 25*3600, 1},
+	}
+	for _, row := range seed {
+		if _, err := s.write.ExecContext(ctx,
+			`INSERT INTO dns_log (client_ip, domain, qtype, ts, noise) VALUES (?,?,?,?,?)`,
+			row.ip, row.domain, "A", row.ts, row.noise); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+	}
+	// Two recent devices + one stale (out of window).
+	for _, dev := range []struct {
+		ip, mac  string
+		lastSeen int64
+	}{
+		{"192.168.1.10", "aa:00:00:00:00:01", now},
+		{"192.168.1.11", "aa:00:00:00:00:02", now - 100},
+		{"192.168.1.13", "aa:00:00:00:00:03", now - 25*3600},
+	} {
+		if _, err := s.write.ExecContext(ctx,
+			`INSERT INTO devices (ip, mac, hostname, last_seen) VALUES (?,?,?,?)`,
+			dev.ip, dev.mac, "", dev.lastSeen); err != nil {
+			t.Fatalf("seed device: %v", err)
+		}
+	}
+
+	sum, err := s.Stats24h(ctx)
+	if err != nil {
+		t.Fatalf("stats 24h: %v", err)
+	}
+	if want := now - 24*3600; sum.CutTS < want-2 || sum.CutTS > want+2 {
+		t.Errorf("cut_ts = %d, want ~%d", sum.CutTS, want)
+	}
+	if sum.Total != 4 {
+		t.Errorf("total = %d, want 4", sum.Total)
+	}
+	if sum.Blocked != 1 {
+		t.Errorf("blocked = %d, want 1", sum.Blocked)
+	}
+	if sum.Domains != 3 {
+		t.Errorf("distinct domains = %d, want 3", sum.Domains)
+	}
+	if sum.Devices != 2 {
+		t.Errorf("active devices = %d, want 2", sum.Devices)
+	}
+
+	// Empty store: zeros without rows are fine.
+	empty, err := s.Stats24h(ctx)
+	if err != nil {
+		t.Fatalf("re-query stats: %v", err)
+	}
+	if empty.Total != 4 || empty.Blocked != 1 {
+		t.Errorf("summary drifted between reads: %+v", empty)
 	}
 }
 

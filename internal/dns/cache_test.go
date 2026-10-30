@@ -21,7 +21,7 @@ func TestDNSCacheCaseInsensitive(t *testing.T) {
 	c.Set("eXaMpLe.CoM.", dns.TypeA, msg)
 
 	// Look up with lowercase without trailing dot
-	hit := c.Get("example.com", dns.TypeA)
+	hit, _ := c.Get("example.com", dns.TypeA)
 	if hit == nil {
 		t.Fatalf("expected cache hit for lowercase name without dot")
 	}
@@ -30,7 +30,7 @@ func TestDNSCacheCaseInsensitive(t *testing.T) {
 	}
 
 	// Look up with uppercase with dot
-	hitUpper := c.Get("EXAMPLE.COM.", dns.TypeA)
+	hitUpper, _ := c.Get("EXAMPLE.COM.", dns.TypeA)
 	if hitUpper == nil {
 		t.Fatalf("expected cache hit for uppercase name with dot")
 	}
@@ -94,7 +94,7 @@ func TestDNSCacheBailiwickFilter(t *testing.T) {
 		t.Fatalf("original msg.Answer mutated: %d answers", n)
 	}
 
-	hit := c.Get("example.com.", dns.TypeA)
+	hit, _ := c.Get("example.com.", dns.TypeA)
 	if hit == nil {
 		t.Fatal("expected cache hit")
 	}
@@ -134,7 +134,7 @@ func TestDNSCacheNegativeNXDOMAIN(t *testing.T) {
 		t.Fatalf("expected ~7s negative TTL, got %v", ttl)
 	}
 
-	hit := c.Get("missing.example.com.", dns.TypeA)
+	hit, _ := c.Get("missing.example.com.", dns.TypeA)
 	if hit == nil {
 		t.Fatal("expected cached NXDOMAIN to be returned")
 	}
@@ -186,7 +186,7 @@ func TestDNSCacheCNAMEChain(t *testing.T) {
 
 	c.Set("www.example.com.", dns.TypeA, msg)
 
-	hit := c.Get("www.example.com.", dns.TypeA)
+	hit, _ := c.Get("www.example.com.", dns.TypeA)
 	if hit == nil {
 		t.Fatal("expected cache hit for CNAME query")
 	}
@@ -210,11 +210,76 @@ func TestDNSCacheTTLCountdown(t *testing.T) {
 	}
 	c.Set("ttl.example.com.", dns.TypeA, msg)
 
-	hit := c.Get("ttl.example.com.", dns.TypeA)
+	hit, _ := c.Get("ttl.example.com.", dns.TypeA)
 	if hit == nil {
 		t.Fatal("expected cache hit")
 	}
 	if hit.Answer[0].Header().Ttl > 100 || hit.Answer[0].Header().Ttl < 95 {
 		t.Fatalf("expected TTL ~100s, got %d", hit.Answer[0].Header().Ttl)
+	}
+}
+
+// TestDNSCachePrefetch pins the optimistic-prefetch contract: a fresh entry
+// is served without a prefetch hint; an entry with less than 20% of its
+// original TTL (or under 15s) left is served immediately but flagged hot;
+// expired entries are misses (never served, never flagged).
+func TestDNSCachePrefetch(t *testing.T) {
+	c := newDNSCache(100)
+	msg := new(dns.Msg)
+	msg.SetQuestion("hot.example.com.", dns.TypeA)
+	msg.Answer = []dns.RR{
+		&dns.A{
+			Hdr: dns.RR_Header{Name: "hot.example.com.", Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 300},
+			A:   []byte{1, 2, 3, 4},
+		},
+	}
+
+	if _, prefetch := c.Get("hot.example.com.", dns.TypeA); prefetch {
+		t.Fatal("empty cache must miss, not prefetch")
+	}
+
+	c.Set("hot.example.com.", dns.TypeA, msg)
+	if _, prefetch := c.Get("hot.example.com.", dns.TypeA); prefetch {
+		t.Fatal("fresh entry must not be flagged for prefetch")
+	}
+
+	// Age the entry: 220s lived of a 300s life → 80s left (>20%), no hint.
+	entry := c.entries[c.key("hot.example.com.", dns.TypeA)]
+	entry.expiresAt = time.Now().Add(80 * time.Second)
+	entry.cachedAt = entry.expiresAt.Add(-300 * time.Second)
+	c.entries[c.key("hot.example.com.", dns.TypeA)] = entry
+	if _, prefetch := c.Get("hot.example.com.", dns.TypeA); prefetch {
+		t.Fatal("80s of 300s left must not be prefetchable")
+	}
+
+	// 20s left of a 300s life (< ~7%): hot.
+	entry = c.entries[c.key("hot.example.com.", dns.TypeA)]
+	entry.expiresAt = time.Now().Add(20 * time.Second)
+	entry.cachedAt = entry.expiresAt.Add(-300 * time.Second)
+	c.entries[c.key("hot.example.com.", dns.TypeA)] = entry
+	hit, prefetch := c.Get("hot.example.com.", dns.TypeA)
+	if hit == nil || !prefetch {
+		t.Fatal("entry near expiry must be served and flagged for prefetch")
+	}
+	if hit.Answer[0].Header().Ttl > 20 || hit.Answer[0].Header().Ttl < 19 {
+		t.Fatalf("cached answer TTL should reflect ~20s remaining, got %d", hit.Answer[0].Header().Ttl)
+	}
+
+	// Absolute rule: under 15s remaining is hot even when the entry is young.
+	c.Set("short.example.com.", dns.TypeA, msg)
+	short := c.entries[c.key("short.example.com.", dns.TypeA)]
+	short.expiresAt = time.Now().Add(14 * time.Second)
+	short.cachedAt = short.expiresAt.Add(-300 * time.Second)
+	c.entries[c.key("short.example.com.", dns.TypeA)] = short
+	if _, prefetch := c.Get("short.example.com.", dns.TypeA); !prefetch {
+		t.Fatal("under 15s remaining must be prefetchable regardless of ratio")
+	}
+
+	// Just expired: still a miss.
+	short = c.entries[c.key("short.example.com.", dns.TypeA)]
+	short.expiresAt = time.Now().Add(-time.Second)
+	c.entries[c.key("short.example.com.", dns.TypeA)] = short
+	if hit, prefetch := c.Get("short.example.com.", dns.TypeA); hit != nil || prefetch {
+		t.Fatal("expired entry must not be served")
 	}
 }

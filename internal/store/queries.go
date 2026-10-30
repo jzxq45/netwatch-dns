@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"time"
 )
 
 // EventKind values of unified log rows.
@@ -44,6 +45,55 @@ type TopRow struct {
 	Hostname string
 	Domain   string
 	Count    int
+}
+
+// StatsSummary aggregates the last 24h of DNS activity: totals for the
+// /api/stats endpoint and the Prometheus exposition.
+type StatsSummary struct {
+	// CutTS is the unix-seconds start of the 24h window (query time - 24h).
+	CutTS int64 `json:"cut_ts"`
+	// Total is all dns_log rows in the window.
+	Total int64 `json:"total"`
+	// Blocked counts noise-flagged rows (blocklist matches + noise).
+	Blocked int64 `json:"blocked"`
+	// Devices is the number of device-table entries seen in the window.
+	Devices int64 `json:"devices"`
+	// Domains counts distinct domains queried in the window.
+	Domains int64 `json:"domains"`
+}
+
+// Stats24h sums the 24h activity: total queries, blocked, active devices
+// and unique domains (AdGuard Home "last 24 hours" tileset).
+func (s *Store) Stats24h(ctx context.Context) (StatsSummary, error) {
+	cutoff := time.Now().Add(-24 * time.Hour).Unix()
+	var sum StatsSummary
+	sum.CutTS = cutoff
+
+	var total, blocked int64
+	if err := s.read.QueryRowContext(ctx,
+		`SELECT COUNT(*), COALESCE(SUM(CASE WHEN noise = 1 THEN 1 ELSE 0 END), 0)
+		 FROM dns_log WHERE ts >= ?`, cutoff).
+		Scan(&total, &blocked); err != nil {
+		return StatsSummary{}, fmt.Errorf("stats 24h totals: %w", err)
+	}
+	sum.Total, sum.Blocked = total, blocked
+
+	var domains int64
+	if err := s.read.QueryRowContext(ctx,
+		`SELECT COUNT(DISTINCT domain) FROM dns_log WHERE ts >= ?`, cutoff).
+		Scan(&domains); err != nil {
+		return StatsSummary{}, fmt.Errorf("stats 24h domains: %w", err)
+	}
+	sum.Domains = domains
+
+	var devices int64
+	if err := s.read.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM devices WHERE last_seen >= ?`, cutoff).
+		Scan(&devices); err != nil {
+		return StatsSummary{}, fmt.Errorf("stats 24h devices: %w", err)
+	}
+	sum.Devices = devices
+	return sum, nil
 }
 
 // The unified feed readers fetch per-table top-N slices (index-backed

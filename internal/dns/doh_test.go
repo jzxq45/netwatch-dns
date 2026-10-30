@@ -45,7 +45,7 @@ func TestDoHUpstream(t *testing.T) {
 	}
 
 	q := dns.Question{Name: "test.local.", Qtype: dns.TypeA}
-	res, err := srv.resolveUpstream(q)
+	res, err := srv.resolveUpstream(q, 0)
 	if err != nil {
 		t.Fatalf("resolveUpstream DoH failed: %v", err)
 	}

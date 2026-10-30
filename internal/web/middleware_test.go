@@ -44,6 +44,9 @@ func (failingStore) ListDevices(context.Context) ([]store.DeviceRow, error) {
 func (failingStore) TopDomains(context.Context, int64, int) ([]store.TopRow, error) {
 	return nil, fixtureErr
 }
+func (failingStore) Stats24h(context.Context) (store.StatsSummary, error) {
+	return store.StatsSummary{}, fixtureErr
+}
 func (failingStore) SetDeviceHostname(context.Context, string, string) error {
 	return fixtureErr
 }

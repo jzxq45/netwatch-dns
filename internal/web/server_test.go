@@ -186,6 +186,87 @@ func TestAPIEventsJSON(t *testing.T) {
 	}
 }
 
+// TestAPIStats pins the /api/stats JSON contract over the seeded data:
+// 3 dns rows in window (1 blocked), 3 distinct domains, 1 active device,
+// and cache metrics mirrored from expvar.
+func TestAPIStats(t *testing.T) {
+	t.Parallel()
+	srv := New(seedStore(t), nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/stats", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; body=%s", rec.Code, rec.Body)
+	}
+	ct := rec.Header().Get("Content-Type")
+	if !strings.Contains(ct, "application/json") {
+		t.Fatalf("content type = %q", ct)
+	}
+	var out map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("bad json: %v", err)
+	}
+	eq := map[string]float64{
+		"total":   3,
+		"blocked": 1,
+		"devices": 1,
+		"domains": 3,
+	}
+	for k, want := range eq {
+		if got := out[k]; int(got.(float64)) != int(want) {
+			t.Errorf("%s = %v, want %v", k, got, want)
+		}
+	}
+	blockPct := out["block_pct"].(float64)
+	if blockPct < 33.0 || blockPct > 34.0 {
+		t.Errorf("block_pct = %v, want ~33.3", blockPct)
+	}
+	if _, ok := out["cache_hit_ratio"]; !ok {
+		t.Error("cache_hit_ratio missing")
+	}
+	if _, ok := out["cache_hits"]; !ok {
+		t.Error("cache_hits missing")
+	}
+	if _, ok := out["cache_misses"]; !ok {
+		t.Error("cache_misses missing")
+	}
+}
+
+// TestMetricsPrometheus pins the Prometheus exposition format of
+// /metrics/prometheus: HELP/TYPE headers and a named sample per metric.
+func TestMetricsPrometheus(t *testing.T) {
+	t.Parallel()
+	srv := New(seedStore(t), nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics/prometheus", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "text/plain") {
+		t.Fatalf("content type = %q, want Prometheus text/plain", ct)
+	}
+	body := rec.Body.String()
+	for _, name := range []string{
+		"dns_cache_hits_total",
+		"dns_cache_misses_total",
+		"dns_blocked_total",
+		"dns_refused_total",
+		"dns_inflight",
+		"sink_rows_dropped_total",
+	} {
+		help := "# HELP " + name + " "
+		typ := "# TYPE " + name + " "
+		if !strings.Contains(body, help) {
+			t.Errorf("missing %q", help)
+		}
+		if !strings.Contains(body, typ) {
+			t.Errorf("missing %q", typ)
+		}
+		if !strings.Contains(body, "\n"+name+" ") {
+			t.Errorf("missing sample line for %s", name)
+		}
+	}
+}
+
 func TestAPICustomRules(t *testing.T) {
 	t.Parallel()
 	srv := New(seedStore(t), nil)

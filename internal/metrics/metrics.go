@@ -16,6 +16,14 @@ var (
 	// (over max in-flight) and the open-resolver ACL.
 	DNSRefusedTotal = expvar.NewInt("dns_refused_total")
 
+	// DNSCacheHitsTotal: queries answered from the local cache. Ratio with
+	// DNSCacheMissesTotal is the cache hit ratio shown in the UI and exposed
+	// in /metrics/prometheus.
+	DNSCacheHitsTotal = expvar.NewInt("dns_cache_hits_total")
+
+	// DNSCacheMissesTotal: queries that had to go to an upstream resolver.
+	DNSCacheMissesTotal = expvar.NewInt("dns_cache_misses_total")
+
 	// BlockAggrCapTotal: aggregator window entries dropped beyond the
 	// per-window key cap (flood protection, data-plane stays alive).
 	BlockAggrCapTotal = expvar.NewInt("dns_blocklog_capped_total")

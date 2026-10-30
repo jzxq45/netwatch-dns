@@ -10,8 +10,12 @@ import (
 )
 
 type cacheEntry struct {
-	msg       *dns.Msg
+	msg *dns.Msg
+	// expiresAt is when the entry stops being served; cachedAt is when it
+	// was stored, so life = expiresAt-cachedAt is the original TTL used for
+	// optimistic prefetch decisions.
 	expiresAt time.Time
+	cachedAt  time.Time
 }
 
 type dnsCache struct {
@@ -126,42 +130,51 @@ func keepAuthorityBailiwick(qname string, rrs []dns.RR) []dns.RR {
 }
 
 // Get returns a copy of the cached message if present and not expired,
-// with remaining TTL adjusted per RFC 1035.
-func (c *dnsCache) Get(name string, qtype uint16) *dns.Msg {
+// with remaining TTL adjusted per RFC 1035. The second return value reports
+// whether the entry is "hot": still alive but with fewer than 20% of its
+// original TTL (or under 15s) remaining — the caller should refresh it in
+// the background while answering from the cache immediately.
+func (c *dnsCache) Get(name string, qtype uint16) (*dns.Msg, bool) {
 	if c == nil {
-		return nil
+		return nil, false
 	}
 	c.mu.RLock()
 	entry, ok := c.entries[c.key(name, qtype)]
 	c.mu.RUnlock()
 	if !ok {
-		return nil
+		return nil, false
 	}
 	now := time.Now()
 	if now.After(entry.expiresAt) {
-		return nil
+		return nil, false
 	}
+	life := entry.expiresAt.Sub(entry.cachedAt)
+	rem := entry.expiresAt.Sub(now)
+	if life <= 0 {
+		return nil, false
+	}
+	prefetch := rem < 15*time.Second || rem*5 < life
 	resp := entry.msg.Copy()
-	rem := uint32(time.Until(entry.expiresAt).Seconds())
-	if rem < 1 {
-		rem = 1
+	remSec := uint32(rem.Seconds())
+	if remSec < 1 {
+		remSec = 1
 	}
 	for _, rr := range resp.Answer {
 		if rr != nil && rr.Header() != nil {
-			rr.Header().Ttl = rem
+			rr.Header().Ttl = remSec
 		}
 	}
 	for _, rr := range resp.Ns {
 		if rr != nil && rr.Header() != nil {
-			rr.Header().Ttl = rem
+			rr.Header().Ttl = remSec
 		}
 	}
 	for _, rr := range resp.Extra {
 		if rr != nil && rr.Header() != nil && rr.Header().Rrtype != dns.TypeOPT {
-			rr.Header().Ttl = rem
+			rr.Header().Ttl = remSec
 		}
 	}
-	return resp
+	return resp, prefetch
 }
 
 // Set stores a response in the cache. Records outside the queried name's
@@ -212,6 +225,7 @@ func (c *dnsCache) Set(name string, qtype uint16, msg *dns.Msg) {
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	storedAt := time.Now()
 	if len(c.entries) >= c.maxSize {
 		now := time.Now()
 		for k, v := range c.entries {
@@ -232,7 +246,8 @@ func (c *dnsCache) Set(name string, qtype uint16, msg *dns.Msg) {
 	}
 	c.entries[c.key(name, qtype)] = cacheEntry{
 		msg:       filtered,
-		expiresAt: time.Now().Add(time.Duration(ttl) * time.Second),
+		cachedAt:  storedAt,
+		expiresAt: storedAt.Add(time.Duration(ttl) * time.Second),
 	}
 }
 

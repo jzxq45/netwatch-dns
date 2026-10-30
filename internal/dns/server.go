@@ -121,6 +121,11 @@ type Server struct {
 	cache     *dnsCache
 	sf        singleflight.Group
 
+	// prefetching tracks async cache-refreshes in flight per cache key so a
+	// hot entry is refreshed once, not once per query (cache stampede guard).
+	prefetchMu  sync.Mutex
+	prefetching map[string]struct{}
+
 	// inflight bounds concurrent handlers (admission control; DNSInflight is
 	// the observable mirror).
 	inflight atomic.Int64
@@ -196,6 +201,7 @@ func New(cfg Config, db *sql.DB, log *slog.Logger) *Server {
 		tcpClient:        &dns.Client{Timeout: upstreamTO, Net: "tcp"},
 		dohClient:        &http.Client{Timeout: upstreamTO},
 		cache:            newDNSCache(10000),
+		prefetching:      make(map[string]struct{}),
 	}
 }
 
@@ -614,15 +620,31 @@ func (s *Server) exchange(r *dns.Msg) (resp *dns.Msg, err error) {
 	q := r.Question[0]
 	cacheKey := fmt.Sprintf("%s:%d", strings.ToLower(strings.TrimSuffix(q.Name, ".")), q.Qtype)
 
-	if cached := s.cache.Get(q.Name, q.Qtype); cached != nil {
+	// Client's EDNS0 UDP payload size (RFC 6891), sent downstream when the
+	// client advertised one. Clamped to 1232 (DNS Flag Day 2020) so big
+	// answers never push the upstream UDP path into IP fragmentation — the
+	// main truncation/amplification hazard on the open Internet.
+	clientEDNS := ednsUDPSize(r)
+
+	if cached, prefetch := s.cache.Get(q.Name, q.Qtype); cached != nil {
+		metrics.DNSCacheHitsTotal.Add(1)
+		if prefetch {
+			s.refreshAsync(q, clientEDNS)
+		}
 		return cached, nil
 	}
+	metrics.DNSCacheMissesTotal.Add(1)
 
 	val, err, _ := s.sf.Do(cacheKey, func() (any, error) {
-		if cached := s.cache.Get(q.Name, q.Qtype); cached != nil {
+		if cached, prefetch := s.cache.Get(q.Name, q.Qtype); cached != nil {
+			if prefetch {
+				s.refreshAsync(q, clientEDNS)
+			}
+			// The outer path already counted this miss; a lucky hit here
+			// (entry refreshed between the two Get calls) just answers fast.
 			return cached, nil
 		}
-		res, upErr := s.resolveUpstream(q)
+		res, upErr := s.resolveUpstream(q, clientEDNS)
 		if upErr != nil {
 			return nil, upErr
 		}
@@ -641,11 +663,47 @@ func (s *Server) exchange(r *dns.Msg) (resp *dns.Msg, err error) {
 	return msg.Copy(), nil
 }
 
-func (s *Server) resolveUpstream(q dns.Question) (*dns.Msg, error) {
+// refreshAsync re-resolves a soon-to-expire ("hot") cache entry in the
+// background without delaying the answer served from the cache — the
+// AdGuard Home / CoreDNS optimistic prefetch pattern. Refreshes never
+// count cache hits/misses: they are upstream maintenance, not client traffic.
+func (s *Server) refreshAsync(q dns.Question, ednsSize uint16) {
+	cacheKey := fmt.Sprintf("%s:%d", strings.ToLower(strings.TrimSuffix(q.Name, ".")), q.Qtype)
+	s.prefetchMu.Lock()
+	if _, busy := s.prefetching[cacheKey]; busy {
+		s.prefetchMu.Unlock()
+		return
+	}
+	s.prefetching[cacheKey] = struct{}{}
+	s.prefetchMu.Unlock()
+	go func() {
+		defer func() {
+			s.prefetchMu.Lock()
+			delete(s.prefetching, cacheKey)
+			s.prefetchMu.Unlock()
+		}()
+		s.sf.Do(cacheKey, func() (any, error) {
+			res, err := s.resolveUpstream(q, ednsSize)
+			if err != nil {
+				return nil, err
+			}
+			if res.Rcode == dns.RcodeSuccess || res.Rcode == dns.RcodeNameError {
+				s.cache.Set(q.Name, q.Qtype, res)
+			}
+			return res, nil
+		})
+	}()
+}
+
+func (s *Server) resolveUpstream(q dns.Question, ednsSize uint16) (*dns.Msg, error) {
 	msg := new(dns.Msg)
 	msg.SetQuestion(q.Name, q.Qtype)
 	msg.RecursionDesired = true
-
+	// RFC 6891: only advertise EDNS0 downstream when the client used it;
+	// size is the client's, clamped by DNS Flag Day 2020 (max 1232).
+	if size := clampEDNSUDP(ednsSize); size > 0 {
+		msg.SetEdns0(size, false)
+	}
 	hasFallback := s.fallbackUpstream != "" && s.fallbackUpstream != s.upstream
 	now := time.Now().Unix()
 
@@ -765,4 +823,34 @@ func clientIP(a net.Addr) string {
 		return a.String()
 	}
 	return host
+}
+
+// maxUpstreamEDNS is the largest UDP payload size we advertise upstream
+// (DNS Flag Day 2020): 1232 guarantees DNS-over-UDP answers avoid IP
+// fragmentation on typical MTU 1500 / tunnel paths.
+const maxUpstreamEDNS = 1232
+
+// ednsUDPSize extracts the client's advertised EDNS0 UDP payload size
+// (RFC 6891); 0 means the client sent no EDNS0 record.
+func ednsUDPSize(r *dns.Msg) uint16 {
+	if opt := r.IsEdns0(); opt != nil && opt.UDPSize() > 0 {
+		return opt.UDPSize()
+	}
+	return 0
+}
+
+// clampEDNSUDP maps a client EDNS0 size onto a safe upstream value:
+// 0 (no EDNS0) stays 0, smaller clients are lifted to the 512 minimum,
+// and anything above 1232 is capped.
+func clampEDNSUDP(size uint16) uint16 {
+	switch {
+	case size == 0:
+		return 0
+	case size < 512:
+		return 512
+	case size > maxUpstreamEDNS:
+		return maxUpstreamEDNS
+	default:
+		return size
+	}
 }
