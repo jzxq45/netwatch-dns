@@ -105,6 +105,9 @@ func New(st Store, log *slog.Logger) *Server {
 	mux.HandleFunc("GET /api/services", s.apiServices)
 	mux.HandleFunc("POST /api/services/toggle", s.apiServiceToggle)
 	mux.HandleFunc("GET /api/network", s.apiNetwork)
+	mux.HandleFunc("GET /api/qr", s.apiQR)
+	mux.HandleFunc("GET /api/apple.mobileconfig", s.appleMobileConfig)
+	mux.HandleFunc("GET /netwatch.mobileconfig", s.appleMobileConfig)
 	mux.HandleFunc("POST /api/local-dns", s.apiSetLocalDNS)
 	mux.HandleFunc("POST /api/autostart", s.apiSetAutostart)
 	mux.HandleFunc("POST /api/device/rename", s.apiRenameDevice)
@@ -364,9 +367,27 @@ const contentFeed = `
     <table id="rwTable" style="margin-top:.5rem"><tbody></tbody></table>
   </div>
 </div>
-  <div id="phonePairCard" style="display:none;margin-top:.8rem;padding:.7rem .9rem;border:1px dashed var(--line);border-radius:var(--radius);font-size:.85rem">
-    <b>📱 Мобильное приложение:</b> укажите адрес <span class="chip" id="phonePairAddr">http://...</span> в настройках Netwatch на телефоне (тот же Wi-Fi).
-    <a class="chip link" href="/download/netwatch.apk" download style="margin-top:.4rem;display:inline-block">📥 Скачать NetWatch.apk</a>
+  <div id="phonePairCard" style="display:none;margin-top:.8rem;padding:.8rem .95rem;border:1px dashed var(--line);border-radius:var(--radius);font-size:.85rem">
+    <div style="display:flex;gap:1rem;align-items:center;flex-wrap:wrap">
+      <div style="flex:0 0 auto;text-align:center">
+        <img id="phonePairQR" alt="QR-код для мгновенного сопряжения" width="136" height="136"
+             style="display:block;width:136px;height:136px;background:#fff;padding:6px;border-radius:8px">
+        <span class="mute" style="font-size:.7rem">наведите камеру телефона</span>
+      </div>
+      <div style="flex:1 1 17rem;min-width:15rem">
+        <b>📱 Мгновенное сопряжение</b>
+        <div style="margin-top:.35rem">Адрес панели: <span class="chip" id="phonePairAddr">http://...</span></div>
+        <div style="margin-top:.6rem">
+          <b>📱 Android:</b>
+          <a class="chip link" href="/download/netwatch.apk" download style="margin-left:.35rem">📥 Скачать NetWatch.apk</a>
+        </div>
+        <div style="margin-top:.6rem">
+          <b>🍏 Apple (iPhone / iPad / Mac):</b>
+          <a class="chip link" id="btnAppleProfile" href="/netwatch.mobileconfig" download style="margin-left:.35rem">🍏 Установить профиль iOS (.mobileconfig)</a>
+          <div class="mute" style="font-size:.72rem;margin-top:.3rem">Safari → «Разрешить» → Настройки → Профиль загружен → Установить. Весь DNS-трафик пойдёт через NetWatch без сторонних приложений.</div>
+        </div>
+      </div>
+    </div>
   </div>
 </div>
 <h2>Лента <span class="sub">последние {{len .Data.Events}}</span></h2>

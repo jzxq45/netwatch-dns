@@ -62,6 +62,14 @@
     var btnPhonePair = document.getElementById('btnPhonePair');
     var phonePairCard = document.getElementById('phonePairCard');
     var phonePairAddr = document.getElementById('phonePairAddr');
+    var phonePairQR = document.getElementById('phonePairQR');
+
+    function syncPhonePair() {
+      if (!lanIp) return;
+      var pairUrl = 'http://' + lanIp + (window.location.port ? ':' + window.location.port : '');
+      if (phonePairAddr) phonePairAddr.textContent = pairUrl;
+      if (phonePairQR) phonePairQR.src = '/api/qr?text=' + encodeURIComponent(pairUrl);
+    }
 
     function applyDnsState(active) {
       localDnsActive = active;
@@ -108,6 +116,7 @@
         if (phonePairAddr) {
           phonePairAddr.textContent = 'http://' + lanIp + (window.location.port ? ':' + window.location.port : '');
         }
+        syncPhonePair();
         setupCard.style.display = 'block';
       })
       .catch(function () {});
@@ -262,7 +271,9 @@
 
     if (btnPhonePair && phonePairCard) {
       btnPhonePair.addEventListener('click', function () {
-        phonePairCard.style.display = phonePairCard.style.display === 'none' ? 'block' : 'none';
+        var show = phonePairCard.style.display === 'none' || !phonePairCard.style.display;
+        if (show) syncPhonePair();
+        phonePairCard.style.display = show ? 'block' : 'none';
       });
       // BUG-09: закрывать подсказку по Escape
       document.addEventListener('keydown', function (ev) {
