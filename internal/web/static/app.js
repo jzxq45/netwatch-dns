@@ -56,6 +56,7 @@
     var valBlockedRules = document.getElementById('valBlockedRules');
     var valCacheRatio = document.getElementById('valCacheRatio');
     var valBlockPct = document.getElementById('valBlockPct');
+    var valAIBlocked = document.getElementById('valAIBlocked');
     var servicesCard = document.getElementById('servicesCard');
     var servicesList = document.getElementById('servicesList');
     var btnPhonePair = document.getElementById('btnPhonePair');
@@ -117,6 +118,7 @@
       .then(function (stats) {
         if (valBlockPct) valBlockPct.textContent = Math.round(stats.block_pct || 0);
         if (valCacheRatio) valCacheRatio.textContent = Math.round(stats.cache_hit_ratio || 0);
+        if (valAIBlocked) valAIBlocked.textContent = stats.ai_blocked || 0;
       })
       .catch(function () {});
 

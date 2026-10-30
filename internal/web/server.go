@@ -341,6 +341,7 @@ const contentFeed = `
       <div class="chip" id="lblBlockStats" title="Активная защита от рекламы и вредоносных доменов">🛡️ Защита: <span id="valBlockedQueries">0</span> угроз (<span id="valBlockedRules">0</span> правил)</div>
       <div class="chip" id="lblCacheStats" title="Доля доменов, отвеченных из локального кэша за всё время">💾 Кэш: <span id="valCacheRatio">0</span>%</div>
       <div class="chip" id="lblStatStats" title="Доля заблокированных запросов за 24 часа (по /api/stats)">🚫 Блок: <span id="valBlockPct">0</span>%</div>
+      <div class="chip" id="lblAIStats" title="Нейтрализованные ИИ угрозы нулевого дня (DGA, фишинг, спуфинг)">🤖 AI-Щит: <span id="valAIBlocked">0</span> угроз</div>
     </div>
   </div>
   <div id="localDnsError" style="color:#ff8080;font-size:.82rem;margin-top:.4rem;display:none"></div>
@@ -813,12 +814,14 @@ func (s *Server) apiStats(w http.ResponseWriter, r *http.Request) {
 		CacheHits     int64   `json:"cache_hits"`
 		CacheMisses   int64   `json:"cache_misses"`
 		CacheHitRatio float64 `json:"cache_hit_ratio"`
+		AIBlocked     int64   `json:"ai_blocked"`
 	}{
 		StatsSummary:  sum,
 		BlockPct:      blockPct,
 		CacheHits:     hits,
 		CacheMisses:   misses,
 		CacheHitRatio: cacheRatio,
+		AIBlocked:     metrics.DNSAIBlockedTotal.Value(),
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(out) //nolint:errcheck // client may vanish mid-write
@@ -839,6 +842,7 @@ func (s *Server) prometheusMetrics(w http.ResponseWriter, _ *http.Request) {
 		{"dns_cache_hits_total", "DNS queries answered from local cache.", "counter", metrics.DNSCacheHitsTotal.Value()},
 		{"dns_cache_misses_total", "DNS queries forwarded to an upstream resolver.", "counter", metrics.DNSCacheMissesTotal.Value()},
 		{"dns_blocked_total", "DNS queries answered with NXDOMAIN by a blocklist match.", "counter", metrics.DNSBlockedTotal.Value()},
+		{"dns_ai_blocked_total", "Zero-day DNS threats (DGA/phishing) answered NXDOMAIN by the local AI engine.", "counter", metrics.DNSAIBlockedTotal.Value()},
 		{"dns_refused_total", "DNS queries refused (admission control / open-resolver ACL).", "counter", metrics.DNSRefusedTotal.Value()},
 		{"dns_inflight", "DNS queries currently pending an upstream answer.", "gauge", metrics.DNSInflight.Value()},
 		{"dns_log_rows_rejected_total", "Serve-path DNS rows dropped because the writer queue was full.", "counter", metrics.LogRowsRejectedTotal.Value()},

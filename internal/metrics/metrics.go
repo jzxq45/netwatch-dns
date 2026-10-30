@@ -31,6 +31,10 @@ var (
 	// DNSBlockedTotal: queries answered NXDOMAIN from a blocklist match.
 	DNSBlockedTotal = expvar.NewInt("dns_blocked_total")
 
+	// DNSAIBlockedTotal: zero-day threats (DGA / phishing / spoofing) answered
+	// NXDOMAIN by the local heuristic AI engine.
+	DNSAIBlockedTotal = expvar.NewInt("dns_ai_blocked_total")
+
 	// LogRowsRejectedTotal: serve-path rows the sink queue could not accept.
 	LogRowsRejectedTotal = expvar.NewInt("dns_log_rows_rejected_total")
 

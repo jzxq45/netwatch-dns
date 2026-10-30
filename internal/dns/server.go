@@ -121,6 +121,10 @@ type Server struct {
 	cache     *dnsCache
 	sf        singleflight.Group
 
+	// aiEngine scores non-blocklisted names heuristically (DGA/phishing) so
+	// zero-day threats never reach upstream. Stateless: safe to share.
+	aiEngine *filter.AIEngine
+
 	// prefetching tracks async cache-refreshes in flight per cache key so a
 	// hot entry is refreshed once, not once per query (cache stampede guard).
 	prefetchMu  sync.Mutex
@@ -209,6 +213,7 @@ func New(cfg Config, db *sql.DB, log *slog.Logger) *Server {
 		cache:            newDNSCache(10000),
 		prefetching:      make(map[string]struct{}),
 		rewrites:         make(map[string]string),
+		aiEngine:         filter.NewAIEngine(),
 	}
 }
 
@@ -672,19 +677,29 @@ func (s *Server) handle(w dns.ResponseWriter, r *dns.Msg) {
 	rewritten := s.rewriteResponse(r)
 	blocked := rewritten == nil && s.isBlocked(q.Name)
 	noisy := s.isNoise(domain)
+	// Heuristic AI shield: names that are neither locally rewritten nor
+	// matched by the blocklist are scored for zero-day patterns (DGA,
+	// phishing, typosquatting). High-confidence threats are answered
+	// NXDOMAIN below and never forwarded upstream.
+	var aiCheck filter.AIAnalysis
+	aiBlocked := false
+	if rewritten == nil && !blocked {
+		aiCheck = s.aiEngine.Analyze(q.Name)
+		aiBlocked = aiCheck.Score >= filter.AIBlockThreshold
+	}
 	if noisy {
 		// noise=1 rows land in the DB (intel) but never in stdout Info.
 		s.log.Debug("dns noise", "client", srcIP, "domain", domain, "qtype", dns.TypeToString[q.Qtype])
 	} else {
 		s.log.Info("dns query", "client", srcIP, "domain", domain, "qtype", dns.TypeToString[q.Qtype], "ts", ts)
 	}
-	rec.Noise = noisy || blocked
+	rec.Noise = noisy || blocked || aiBlocked
 	if s.OnRecord != nil {
 		s.OnRecord(rec)
 	}
 	noiseFlag := 0
-	if noisy || blocked {
-		noiseFlag = 1 // blocked DoH attempts are noise in the feed, too
+	if noisy || blocked || aiBlocked {
+		noiseFlag = 1 // blocked/AI-denied attempts are noise in the feed, too
 	}
 	if !s.snk.TrySend(store.DNSRow{
 		ClientIP: srcIP,
@@ -709,6 +724,14 @@ func (s *Server) handle(w dns.ResponseWriter, r *dns.Msg) {
 		// DoH endpoints are answered NXDOMAIN here; the request itself is
 		// aggregated: one dns_blocked_doh line per (client, domain) per window.
 		s.aggr.add(srcIP, domain)
+		nxdomain(w, r)
+		return
+	}
+	if aiBlocked {
+		metrics.DNSAIBlockedTotal.Add(1)
+		s.log.Info("dns ai blocked zero-day threat",
+			"domain", q.Name, "threat", aiCheck.Threat,
+			"reason", aiCheck.Reason, "score", aiCheck.Score)
 		nxdomain(w, r)
 		return
 	}
