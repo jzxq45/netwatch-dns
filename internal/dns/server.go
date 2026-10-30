@@ -514,7 +514,12 @@ func (s *Server) Start(ctx context.Context, addr string) error {
 }
 
 // blocklistCacheDir keeps downloaded lists across restarts for offline use.
-var blocklistCacheDir = filepath.Join(".", ".cache", "blocklists")
+var blocklistCacheDir = func() string {
+	if dir, err := os.UserCacheDir(); err == nil && dir != "" {
+		return filepath.Join(dir, "netwatch-dns", "blocklists")
+	}
+	return filepath.Join(".", ".cache", "blocklists")
+}()
 
 // refreshLoop periodically re-downloads remote blocklists until ctx is done.
 func (s *Server) refreshLoop(ctx context.Context) {

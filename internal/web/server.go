@@ -1032,8 +1032,7 @@ func (s *Server) apiSetLocalDNS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := sysnet.SetLocalDNS(body.Enabled); err != nil {
-		s.log.Error("set local dns", "err", err)
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		s.fail(w, "set local dns", err)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -1049,8 +1048,7 @@ func (s *Server) apiSetAutostart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := sysnet.SetAutostart(body.Enabled); err != nil {
-		s.log.Error("set autostart", "err", err)
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		s.fail(w, "set autostart", err)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")

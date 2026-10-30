@@ -184,6 +184,11 @@ func run() int {
 // half-bound port; a fatal app error (e.g. DNS bind failure) fails fast.
 func waitWebUp(webURL string, d time.Duration, appDone <-chan struct{}, getErr func() error) error {
 	addr := strings.TrimSuffix(webURL, "/") + "/healthz"
+	if u, err := url.Parse(webURL); err == nil {
+		u.Path = "/healthz"
+		u.RawQuery = ""
+		addr = u.String()
+	}
 	hc := &http.Client{Timeout: time.Second}
 	deadline := time.Now().Add(d)
 	for {

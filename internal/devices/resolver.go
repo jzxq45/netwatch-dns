@@ -32,7 +32,13 @@ const (
 	// racing the sink for the single writer connection.
 	debouncedSeconds = 30
 	maxTrackedIPs    = 4096
+	maxConcurrentARP = 8
 )
+
+type macCacheEntry struct {
+	mac        string
+	retryAfter time.Time
+}
 
 // Resolver turns DNS sightings into device rows. mac/hostname stay untouched —
 // no capture source yet; they get filled when ARP/DHCP sniffing is enabled.
@@ -42,6 +48,7 @@ type Resolver struct {
 
 	sightings chan Record
 	macCache  sync.Map
+	arpSem    chan struct{}
 }
 
 func New(st Store, log *slog.Logger) *Resolver {
@@ -52,6 +59,7 @@ func New(st Store, log *slog.Logger) *Resolver {
 		store:     st,
 		log:       log,
 		sightings: make(chan Record, chanBuffer),
+		arpSem:    make(chan struct{}, maxConcurrentARP),
 	}
 }
 
@@ -132,28 +140,37 @@ func (r *Resolver) upsert(ctx context.Context, rec Record) {
 		return
 	}
 	var macPtr *string
+	now := time.Now()
+	var shouldLookup bool
+
 	if val, ok := r.macCache.Load(rec.ClientIP); ok {
-		m := val.(string)
-		if m != "" {
-			macPtr = &m
+		entry := val.(macCacheEntry)
+		if entry.mac != "" {
+			macPtr = &entry.mac
+		} else if now.After(entry.retryAfter) {
+			shouldLookup = true
 		}
 	} else {
-		r.macCache.Store(rec.ClientIP, "")
-		go func(ip string, ts int64) {
-			actx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
-			defer cancel()
-			if mac, err := LookupMAC(ip); err == nil && mac != "" {
-				r.macCache.Store(ip, mac)
-				_ = r.store.UpsertDevice(actx, ip, &mac, nil, ts)
-			} else {
-				// Temporary failure (device not in ARP table yet): allow retry after 1 minute
-				time.AfterFunc(time.Minute, func() {
-					if v, ok := r.macCache.Load(ip); ok && v.(string) == "" {
-						r.macCache.Delete(ip)
-					}
-				})
-			}
-		}(rec.ClientIP, rec.TS)
+		shouldLookup = true
+	}
+
+	if shouldLookup {
+		select {
+		case r.arpSem <- struct{}{}:
+			// Mark as pending with 1m retry cooldown to prevent duplicate lookups
+			r.macCache.Store(rec.ClientIP, macCacheEntry{retryAfter: now.Add(time.Minute)})
+			go func(ip string, ts int64) {
+				defer func() { <-r.arpSem }()
+				actx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+				defer cancel()
+				if mac, err := LookupMAC(ip); err == nil && mac != "" {
+					r.macCache.Store(ip, macCacheEntry{mac: mac})
+					_ = r.store.UpsertDevice(actx, ip, &mac, nil, ts)
+				}
+			}(rec.ClientIP, rec.TS)
+		default:
+			// Worker pool saturated; skip lookup on this tick to avoid thread exhaustion
+		}
 	}
 	if err := r.store.UpsertDevice(ctx, rec.ClientIP, macPtr, nil, rec.TS); err != nil {
 		r.log.Error("device upsert", "err", err)

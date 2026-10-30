@@ -299,11 +299,16 @@ func (s *Store) DeviceActivity(ctx context.Context, sinceTS int64) (map[string]D
 	}
 
 	sampleRows, err := s.read.QueryContext(ctx, `
-		SELECT client_ip, domain, COUNT(*) AS cnt
-		FROM dns_log
-		WHERE ts >= ? AND noise = 1
-		GROUP BY client_ip, domain
-		ORDER BY client_ip, cnt DESC`, sinceTS)
+		WITH ranked AS (
+			SELECT client_ip, domain,
+			       ROW_NUMBER() OVER (PARTITION BY client_ip ORDER BY COUNT(*) DESC) AS rk
+			FROM dns_log
+			WHERE ts >= ? AND noise = 1
+			GROUP BY client_ip, domain
+		)
+		SELECT client_ip, domain
+		FROM ranked
+		WHERE rk <= ?`, sinceTS, deviceSampleDomains)
 	if err != nil {
 		return nil, fmt.Errorf("device activity samples: %w", err)
 	}
@@ -311,8 +316,7 @@ func (s *Store) DeviceActivity(ctx context.Context, sinceTS int64) (map[string]D
 
 	for sampleRows.Next() {
 		var ip, domain string
-		var cnt int64
-		if err := sampleRows.Scan(&ip, &domain, &cnt); err != nil {
+		if err := sampleRows.Scan(&ip, &domain); err != nil {
 			return nil, fmt.Errorf("scan device sample: %w", err)
 		}
 		a, ok := out[ip]

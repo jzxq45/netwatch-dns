@@ -2,6 +2,15 @@
 (function () {
   'use strict';
 
+  // Sanitize auth token from address bar to prevent shoulder-surfing and log leakage
+  if (window.history && window.history.replaceState && window.location.search && window.location.search.indexOf('token=') !== -1) {
+    try {
+      var u = new URL(window.location.href);
+      u.searchParams.delete('token');
+      window.history.replaceState({}, document.title, u.pathname + (u.search ? u.search : '') + u.hash);
+    } catch (e) {}
+  }
+
   function escapeHTML(s) {
     if (!s) return '';
     return String(s)
@@ -119,7 +128,7 @@
         syncPhonePair();
         setupCard.style.display = 'block';
       })
-      .catch(function () {});
+      .catch(function (err) { console.warn('setup info error:', err); });
 
     // Caps: 24h block percentage and lifetime cache hit ratio from /api/stats.
     fetch('/api/stats')
@@ -129,7 +138,7 @@
         if (valCacheRatio) valCacheRatio.textContent = Math.round(stats.cache_hit_ratio || 0);
         if (valAIBlocked) valAIBlocked.textContent = stats.ai_blocked || 0;
       })
-      .catch(function () {});
+      .catch(function (err) { console.warn('stats fetch error:', err); });
 
     // 1-click service blocking chips (YouTube, TikTok, ...).
     fetch('/api/services')
@@ -167,7 +176,10 @@
               svc.blocked = !svc.blocked;
               paint(svc);
             })
-            .catch(function () {})
+            .catch(function (err) {
+              console.error('services toggle error:', err);
+              alert(err.message || 'Ошибка переключения сервиса');
+            })
             .finally(function () { btn.disabled = false; });
           });
           servicesList.appendChild(btn);
@@ -176,7 +188,7 @@
           servicesList.appendChild(gap);
         });
       })
-      .catch(function () {});
+      .catch(function (err) { console.warn('services fetch error:', err); });
 
     // Local DNS rewrites: table + quick add/delete.
     var rwCard = document.getElementById('rewritesCard');
