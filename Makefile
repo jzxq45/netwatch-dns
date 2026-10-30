@@ -1,5 +1,4 @@
 GO ?= go
-export GOPATH := D:\projects\gopath
 export CGO_ENABLED = 0
 
 .PHONY: build test lint fmt tidy pcap run clean

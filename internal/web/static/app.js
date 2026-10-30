@@ -2,6 +2,16 @@
 (function () {
   'use strict';
 
+  function escapeHTML(s) {
+    if (!s) return '';
+    return String(s)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
   function fmtRel(ts) {
     var d = Math.floor(Date.now() / 1000) - ts;
     if (d < 0) d = 0;
@@ -195,7 +205,7 @@
       var curr = staticName();
       if (curr === '\u2014') curr = '';
       var ip = new URLSearchParams(window.location.search).get('ip');
-      devNameWrap.innerHTML = '<input type="text" class="chip" id="inputDevName" value="' + curr.replace(/"/g, '&quot;') + '"> ' +
+      devNameWrap.innerHTML = '<input type="text" class="chip" id="inputDevName" value="' + escapeHTML(curr) + '"> ' +
         '<button class="chip link" id="btnSaveDevName" style="cursor:pointer">\u2713</button> ' +
         '<button class="chip link" id="btnCancelDevName" style="cursor:pointer">\u2715</button>';
       var input = document.getElementById('inputDevName');
@@ -280,11 +290,15 @@
         var timeStr = pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
 
         var noiseBadge = e.Noise ? ' <span class="badge blocked">noise</span>' : '';
-        tr.innerHTML = '<td class="time" data-ts="' + e.TS + '">' + timeStr + ' · только что</td>' +
-          '<td><span class="badge ' + e.Kind + '">' + e.Kind + '</span></td>' +
-          '<td><a class="chip link" href="/device?ip=' + encodeURIComponent(e.ClientIP) + '">' + e.ClientIP + '</a></td>' +
-          '<td class="dom">' + e.Name + noiseBadge +
-          '<button class="chip btn-block-dom" data-dom="' + e.Name + '" title="Заблокировать этот домен" style="cursor:pointer;padding:0 .35rem;margin-left:.35rem;font-size:.7rem">🚫</button></td>';
+        var safeClient = escapeHTML(e.ClientIP);
+        var safeKind = escapeHTML(e.Kind);
+        var safeName = escapeHTML(e.Name);
+
+        tr.innerHTML = '<td class="time" data-ts="' + Number(e.TS) + '">' + timeStr + ' · только что</td>' +
+          '<td><span class="badge ' + safeKind + '">' + safeKind + '</span></td>' +
+          '<td><a class="chip link" href="/device?ip=' + encodeURIComponent(e.ClientIP) + '">' + safeClient + '</a></td>' +
+          '<td class="dom">' + safeName + noiseBadge +
+          '<button class="chip btn-block-dom" data-dom="' + safeName + '" title="Заблокировать этот домен" style="cursor:pointer;padding:0 .35rem;margin-left:.35rem;font-size:.7rem">🚫</button></td>';
 
         feedTbody.insertBefore(tr, feedTbody.firstChild);
         while (feedTbody.children.length > 100) {

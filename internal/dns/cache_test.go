@@ -163,3 +163,58 @@ func TestDNSCacheNegativeNXDOMAINDefaultTTL(t *testing.T) {
 		t.Fatalf("expected 60s default negative TTL, got %v", elapsed)
 	}
 }
+
+func TestDNSCacheCNAMEChain(t *testing.T) {
+	c := newDNSCache(100)
+	msg := new(dns.Msg)
+	msg.SetQuestion("www.example.com.", dns.TypeA)
+	msg.Rcode = dns.RcodeSuccess
+	msg.Answer = []dns.RR{
+		&dns.CNAME{
+			Hdr:    dns.RR_Header{Name: "www.example.com.", Rrtype: dns.TypeCNAME, Class: dns.ClassINET, Ttl: 300},
+			Target: "cdn.external.net.",
+		},
+		&dns.A{
+			Hdr: dns.RR_Header{Name: "cdn.external.net.", Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 300},
+			A:   []byte{104, 16, 12, 34},
+		},
+		&dns.A{
+			Hdr: dns.RR_Header{Name: "unrelated.evil.com.", Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 300},
+			A:   []byte{6, 6, 6, 6},
+		},
+	}
+
+	c.Set("www.example.com.", dns.TypeA, msg)
+
+	hit := c.Get("www.example.com.", dns.TypeA)
+	if hit == nil {
+		t.Fatal("expected cache hit for CNAME query")
+	}
+	if len(hit.Answer) != 2 {
+		t.Fatalf("expected CNAME + A (2 answers), got %d: %+v", len(hit.Answer), hit.Answer)
+	}
+	if hit.Answer[0].Header().Name != "www.example.com." || hit.Answer[1].Header().Name != "cdn.external.net." {
+		t.Fatalf("unexpected answers preserved: %+v", hit.Answer)
+	}
+}
+
+func TestDNSCacheTTLCountdown(t *testing.T) {
+	c := newDNSCache(100)
+	msg := new(dns.Msg)
+	msg.SetQuestion("ttl.example.com.", dns.TypeA)
+	msg.Answer = []dns.RR{
+		&dns.A{
+			Hdr: dns.RR_Header{Name: "ttl.example.com.", Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 100},
+			A:   []byte{1, 2, 3, 4},
+		},
+	}
+	c.Set("ttl.example.com.", dns.TypeA, msg)
+
+	hit := c.Get("ttl.example.com.", dns.TypeA)
+	if hit == nil {
+		t.Fatal("expected cache hit")
+	}
+	if hit.Answer[0].Header().Ttl > 100 || hit.Answer[0].Header().Ttl < 95 {
+		t.Fatalf("expected TTL ~100s, got %d", hit.Answer[0].Header().Ttl)
+	}
+}

@@ -24,6 +24,19 @@ func TestParseHosts(t *testing.T) {
 	assertDomains(t, got, want)
 }
 
+func TestParseHostsMultiDomain(t *testing.T) {
+	input := `
+0.0.0.0 ad1.com ad2.com ad3.com # comment
+127.0.0.1 tracker1.org tracker2.org
+`
+	got, err := Parse(strings.NewReader(input))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	want := []string{"ad1.com", "ad2.com", "ad3.com", "tracker1.org", "tracker2.org"}
+	assertDomains(t, got, want)
+}
+
 func TestParseAdblock(t *testing.T) {
 	input := `
 ! easylist comment

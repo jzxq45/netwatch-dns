@@ -873,6 +873,10 @@ func (s *Server) apiEventsStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Disable WriteTimeout for the long-lived SSE streaming response
+	rc := http.NewResponseController(w)
+	_ = rc.SetWriteDeadline(time.Time{})
+
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -885,11 +889,20 @@ func (s *Server) apiEventsStream(w http.ResponseWriter, r *http.Request) {
 	_, _ = fmt.Fprintf(w, ": connected\n\n")
 	flusher.Flush()
 
+	// Periodic keepalive prevents NAT/firewall and browser silent timeouts
+	heartbeat := time.NewTicker(15 * time.Second)
+	defer heartbeat.Stop()
+
 	ctx := r.Context()
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case <-heartbeat.C:
+			if _, err := fmt.Fprintf(w, ": ping\n\n"); err != nil {
+				return
+			}
+			flusher.Flush()
 		case e := <-ch:
 			data, err := json.Marshal(e)
 			if err != nil {

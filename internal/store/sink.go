@@ -157,8 +157,13 @@ func (s *Sink) Start(ctx context.Context) error {
 				select {
 				case r := <-s.values:
 					batch = append(batch, r)
+					if len(batch) >= sinkBatchSize {
+						flush()
+					}
 				default:
-					flush()
+					for len(batch) > 0 && flushFails < sinkMaxFlushFails {
+						flush()
+					}
 					return nil
 				}
 			}

@@ -140,9 +140,18 @@ func (r *Resolver) upsert(ctx context.Context, rec Record) {
 	} else {
 		r.macCache.Store(rec.ClientIP, "")
 		go func(ip string, ts int64) {
+			actx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+			defer cancel()
 			if mac, err := LookupMAC(ip); err == nil && mac != "" {
 				r.macCache.Store(ip, mac)
-				_ = r.store.UpsertDevice(context.Background(), ip, &mac, nil, ts)
+				_ = r.store.UpsertDevice(actx, ip, &mac, nil, ts)
+			} else {
+				// Temporary failure (device not in ARP table yet): allow retry after 1 minute
+				time.AfterFunc(time.Minute, func() {
+					if v, ok := r.macCache.Load(ip); ok && v.(string) == "" {
+						r.macCache.Delete(ip)
+					}
+				})
 			}
 		}(rec.ClientIP, rec.TS)
 	}

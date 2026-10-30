@@ -31,15 +31,17 @@ func Parse(r io.Reader) ([]string, error) {
 	seen := make(map[string]struct{})
 
 	for scanner.Scan() {
-		domain := parseLine(scanner.Text())
-		if domain == "" {
-			continue
+		lineDomains := parseLine(scanner.Text())
+		for _, domain := range lineDomains {
+			if domain == "" {
+				continue
+			}
+			if _, ok := seen[domain]; ok {
+				continue
+			}
+			seen[domain] = struct{}{}
+			domains = append(domains, domain)
 		}
-		if _, ok := seen[domain]; ok {
-			continue
-		}
-		seen[domain] = struct{}{}
-		domains = append(domains, domain)
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, err
@@ -47,10 +49,10 @@ func Parse(r io.Reader) ([]string, error) {
 	return domains, nil
 }
 
-func parseLine(line string) string {
+func parseLine(line string) []string {
 	line = strings.TrimSpace(line)
 	if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "!") {
-		return ""
+		return nil
 	}
 
 	// Adblock/easylist: ||example.com^, ||example.com^$third-party, ...
@@ -59,21 +61,37 @@ func parseLine(line string) string {
 		if i := strings.IndexAny(line, "^$"); i >= 0 {
 			line = line[:i]
 		}
-		return cleanDomain(line)
+		if d := cleanDomain(line); d != "" {
+			return []string{d}
+		}
+		return nil
 	}
 
 	fields := strings.Fields(line)
 	if len(fields) == 0 {
-		return ""
+		return nil
 	}
 
-	// Hosts: "0.0.0.0 bad.com" / "127.0.0.1 tracker.org".
+	// Hosts: "0.0.0.0 bad.com bad2.com" / "127.0.0.1 tracker.org".
+	// Many hosts lists (like StevenBlack) group multiple domains per line.
 	if len(fields) > 1 && net.ParseIP(fields[0]) != nil {
-		return cleanDomain(fields[1])
+		var out []string
+		for _, f := range fields[1:] {
+			if strings.HasPrefix(f, "#") {
+				break // inline comment in hosts file
+			}
+			if d := cleanDomain(f); d != "" {
+				out = append(out, d)
+			}
+		}
+		return out
 	}
 
 	// Plain text: one domain per line (an inline comment is ignored).
-	return cleanDomain(fields[0])
+	if d := cleanDomain(fields[0]); d != "" {
+		return []string{d}
+	}
+	return nil
 }
 
 func cleanDomain(domain string) string {

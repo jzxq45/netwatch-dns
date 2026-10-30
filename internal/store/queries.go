@@ -256,13 +256,13 @@ func (s *Store) ListDevices(ctx context.Context) ([]DeviceRow, error) {
 // TopDomains aggregates non-noise DNS domain counts per device since sinceTS.
 func (s *Store) TopDomains(ctx context.Context, sinceTS int64, limit int) ([]TopRow, error) {
 	q := `
-SELECT d.ip, COALESCE(d.hostname,''), t.domain, t.cnt
+SELECT COALESCE(d.ip, t.client_ip), COALESCE(d.hostname,''), t.domain, t.cnt
 FROM (
     SELECT client_ip, domain, count(*) AS cnt
     FROM dns_log WHERE ts > ? AND noise = 0
     GROUP BY client_ip, domain
-) t JOIN devices d ON d.ip = t.client_ip
-ORDER BY d.ip, cnt DESC LIMIT ?`
+) t LEFT JOIN devices d ON d.ip = t.client_ip
+ORDER BY t.client_ip, cnt DESC LIMIT ?`
 	rows, err := s.read.QueryContext(ctx, q, sinceTS, limit)
 	if err != nil {
 		return nil, fmt.Errorf("top domains: %w", err)

@@ -1,6 +1,7 @@
 package dns
 
 import (
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -27,7 +28,7 @@ func newDNSCache(maxSize int) *dnsCache {
 }
 
 func (c *dnsCache) key(name string, qtype uint16) string {
-	return strings.ToLower(strings.TrimSuffix(name, ".")) + "\x00" + dns.TypeToString[qtype]
+	return fmt.Sprintf("%s\x00%d", strings.ToLower(strings.TrimSuffix(name, ".")), qtype)
 }
 
 // inBailiwick reports whether rrName is qname itself or one of its
@@ -52,6 +53,41 @@ func ancestorOrSelf(qname, rrName string) bool {
 		return false
 	}
 	return rrName == qname || strings.HasSuffix(qname, "."+rrName)
+}
+
+// keepAnswerBailiwick filters out records whose owner name is not in the queried
+// name's zone or its CNAME alias chain. If a CNAME points outside the original
+// zone (e.g. www.example.com -> cdn.cloudflare.net), the target's address records
+// in the answer section are preserved so the client receives a complete answer.
+func keepAnswerBailiwick(qname string, rrs []dns.RR) []dns.RR {
+	kept := make([]dns.RR, 0, len(rrs))
+	validTargets := map[string]struct{}{
+		strings.ToLower(strings.TrimSuffix(qname, ".")): {},
+	}
+
+	for _, rr := range rrs {
+		if rr == nil || rr.Header() == nil {
+			continue
+		}
+		name := strings.ToLower(strings.TrimSuffix(rr.Header().Name, "."))
+		matched := false
+		for vt := range validTargets {
+			if inBailiwick(vt, name) {
+				matched = true
+				break
+			}
+		}
+		if matched {
+			kept = append(kept, rr)
+			if cname, ok := rr.(*dns.CNAME); ok {
+				target := strings.ToLower(strings.TrimSuffix(cname.Target, "."))
+				if target != "" {
+					validTargets[target] = struct{}{}
+				}
+			}
+		}
+	}
+	return kept
 }
 
 // keepBailiwick filters out records whose owner name is not in the queried
@@ -89,7 +125,8 @@ func keepAuthorityBailiwick(qname string, rrs []dns.RR) []dns.RR {
 	return kept
 }
 
-// Get returns a copy of the cached message if present and not expired.
+// Get returns a copy of the cached message if present and not expired,
+// with remaining TTL adjusted per RFC 1035.
 func (c *dnsCache) Get(name string, qtype uint16) *dns.Msg {
 	if c == nil {
 		return nil
@@ -100,23 +137,44 @@ func (c *dnsCache) Get(name string, qtype uint16) *dns.Msg {
 	if !ok {
 		return nil
 	}
-	if time.Now().After(entry.expiresAt) {
+	now := time.Now()
+	if now.After(entry.expiresAt) {
 		return nil
 	}
-	return entry.msg.Copy()
+	resp := entry.msg.Copy()
+	rem := uint32(time.Until(entry.expiresAt).Seconds())
+	if rem < 1 {
+		rem = 1
+	}
+	for _, rr := range resp.Answer {
+		if rr != nil && rr.Header() != nil {
+			rr.Header().Ttl = rem
+		}
+	}
+	for _, rr := range resp.Ns {
+		if rr != nil && rr.Header() != nil {
+			rr.Header().Ttl = rem
+		}
+	}
+	for _, rr := range resp.Extra {
+		if rr != nil && rr.Header() != nil && rr.Header().Rrtype != dns.TypeOPT {
+			rr.Header().Ttl = rem
+		}
+	}
+	return resp
 }
 
 // Set stores a response in the cache. Records outside the queried name's
-// bailiwick are dropped (cache poisoning guard). TTL bounds: positive
-// answers 5s..1h; NXDOMAIN 5s..300s per RFC 2308 (SOA TTL vs SOA.MINIMUM,
-// safe 60s default when no SOA is present).
+// bailiwick (or CNAME chain in answers) are dropped (cache poisoning guard).
+// TTL bounds: positive answers 5s..1h; NXDOMAIN 5s..300s per RFC 2308
+// (SOA TTL vs SOA.MINIMUM, safe 60s default when no SOA is present).
 func (c *dnsCache) Set(name string, qtype uint16, msg *dns.Msg) {
 	if c == nil || msg == nil {
 		return
 	}
 	// Copy first, then filter: the caller keeps ownership of msg as-is.
 	filtered := msg.Copy()
-	filtered.Answer = keepBailiwick(name, msg.Answer)
+	filtered.Answer = keepAnswerBailiwick(name, msg.Answer)
 	filtered.Ns = keepAuthorityBailiwick(name, msg.Ns)
 	filtered.Extra = keepBailiwick(name, msg.Extra)
 

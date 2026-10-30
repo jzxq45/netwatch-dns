@@ -13,10 +13,12 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime/debug"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -123,10 +125,12 @@ type Server struct {
 	// the observable mirror).
 	inflight atomic.Int64
 
-	// consecutiveFails is a featherweight circuit breaker signal: how many
-	// primary upstream exchanges failed in a row (observable via metrics/
-	// tests; reset to 0 on any successful exchange, primary or fallback).
+	// consecutiveFails counts sequential primary upstream errors for circuit breaking.
 	consecutiveFails atomic.Int32
+
+	// fallbackUntil holds unix seconds until when primary is in cooldown
+	// and queries route directly to fallback without waiting on primary timeouts.
+	fallbackUntil atomic.Int64
 }
 
 func New(cfg Config, db *sql.DB, log *slog.Logger) *Server {
@@ -146,11 +150,18 @@ func New(cfg Config, db *sql.DB, log *slog.Logger) *Server {
 	for _, entry := range normalizedBlocklist {
 		blockMatcher.Add(entry)
 	}
+	// Never self-block configured upstream resolvers even if listed in DoH blocks
+	for _, up := range []string{cfg.Upstream, cfg.FallbackUpstream} {
+		if host := extractUpstreamHost(up); host != "" {
+			blockMatcher.AddAllow(host)
+		}
+	}
 	for _, path := range cfg.BlocklistFiles {
 		addBlocklistFile(blockMatcher, path, log)
 	}
 	if len(cfg.BlocklistURLs) > 0 {
-		client := &http.Client{Timeout: 30 * time.Second}
+		// Bounded timeout on initial startup to ensure UI health probe succeeds
+		client := &http.Client{Timeout: 5 * time.Second}
 		for _, u := range cfg.BlocklistURLs {
 			domains, err := filter.FetchURL(context.Background(), u, blocklistCacheDir, client)
 			if err != nil {
@@ -271,16 +282,81 @@ func (s *Server) isNoise(name string) bool {
 	return false
 }
 
+var (
+	localV6PrefixesMu sync.RWMutex
+	localV6Prefixes   []netip.Prefix
+	localV6Updated    time.Time
+)
+
+func isLocalSubnetIPv6(addr netip.Addr) bool {
+	localV6PrefixesMu.RLock()
+	if time.Since(localV6Updated) < 30*time.Second {
+		for _, p := range localV6Prefixes {
+			if p.Contains(addr) {
+				localV6PrefixesMu.RUnlock()
+				return true
+			}
+		}
+		localV6PrefixesMu.RUnlock()
+		return false
+	}
+	localV6PrefixesMu.RUnlock()
+
+	localV6PrefixesMu.Lock()
+	defer localV6PrefixesMu.Unlock()
+	localV6Prefixes = localV6Prefixes[:0]
+	if ifaddrs, err := net.InterfaceAddrs(); err == nil {
+		for _, ia := range ifaddrs {
+			if ipnet, ok := ia.(*net.IPNet); ok {
+				if pref, err := netip.ParsePrefix(ipnet.String()); err == nil && pref.Addr().Is6() {
+					localV6Prefixes = append(localV6Prefixes, pref)
+				}
+			}
+		}
+	}
+	localV6Updated = time.Now()
+	for _, p := range localV6Prefixes {
+		if p.Contains(addr) {
+			return true
+		}
+	}
+	return false
+}
+
+func extractUpstreamHost(addr string) string {
+	addr = strings.TrimSpace(addr)
+	if addr == "" {
+		return ""
+	}
+	if strings.HasPrefix(addr, "http://") || strings.HasPrefix(addr, "https://") {
+		u, err := url.Parse(addr)
+		if err == nil && u.Hostname() != "" {
+			return strings.ToLower(strings.TrimSuffix(u.Hostname(), "."))
+		}
+	}
+	host, _, err := net.SplitHostPort(addr)
+	if err == nil && host != "" {
+		return strings.ToLower(strings.TrimSuffix(host, "."))
+	}
+	return strings.ToLower(strings.TrimSuffix(addr, "."))
+}
+
 // trustedClient reports whether the source is a LAN client we serve
-// (loopback, private ranges, link-local). Anything else — e.g. a packet
-// DNAT'ed from the WAN — gets REFUSED: we are not an open recursive resolver
+// (loopback, private ranges, link-local, or belonging to a locally attached IPv6 prefix).
+// Anything else — e.g. a packet DNAT'ed from the WAN — gets REFUSED: we are not an open recursive resolver
 // or an amplification target.
 func trustedClient(host string) bool {
 	a, err := netip.ParseAddr(host) // ParseAddr, not ParseIP: handles v6 zones
 	if err != nil {
 		return false
 	}
-	return a.IsLoopback() || a.IsPrivate() || a.IsLinkLocalUnicast()
+	if a.IsLoopback() || a.IsPrivate() || a.IsLinkLocalUnicast() {
+		return true
+	}
+	if a.Is6() {
+		return isLocalSubnetIPv6(a)
+	}
+	return false
 }
 
 // Start serves DNS (UDP+TCP) on addr until ctx is done. Returns only after
@@ -570,12 +646,29 @@ func (s *Server) resolveUpstream(q dns.Question) (*dns.Msg, error) {
 	msg.SetQuestion(q.Name, q.Qtype)
 	msg.RecursionDesired = true
 
+	hasFallback := s.fallbackUpstream != "" && s.fallbackUpstream != s.upstream
+	now := time.Now().Unix()
+
+	// Circuit breaker: if primary is in cooldown, query fallback directly to avoid 2-4s timeout penalty
+	if hasFallback && now < s.fallbackUntil.Load() {
+		resp, err := s.tryUpstream(msg, s.fallbackUpstream)
+		if err == nil {
+			return resp, nil
+		}
+		// Fallback failed; reset cooldown and attempt primary as fallback
+		s.fallbackUntil.Store(0)
+	}
+
 	resp, err := s.tryUpstream(msg, s.upstream)
 	if err != nil {
-		if s.fallbackUpstream != "" && s.fallbackUpstream != s.upstream {
+		if hasFallback {
 			s.log.Warn("primary upstream failed, trying fallback",
 				"upstream", s.upstream, "fallback", s.fallbackUpstream, "err", err)
-			s.consecutiveFails.Add(1)
+			fails := s.consecutiveFails.Add(1)
+			if fails >= 3 {
+				// Trip circuit breaker: route directly to fallback for 30s
+				s.fallbackUntil.Store(time.Now().Add(30 * time.Second).Unix())
+			}
 			resp, err = s.tryUpstream(msg, s.fallbackUpstream)
 			if err != nil {
 				return nil, err
@@ -586,6 +679,7 @@ func (s *Server) resolveUpstream(q dns.Question) (*dns.Msg, error) {
 		return nil, err
 	}
 	s.consecutiveFails.Store(0)
+	s.fallbackUntil.Store(0)
 	return resp, nil
 }
 

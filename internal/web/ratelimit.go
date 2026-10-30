@@ -73,23 +73,28 @@ func (l *limiter) sweep(now time.Time) {
 	}
 }
 
-// clientIPFromRequest extracts client IP safely checking X-Forwarded-For and X-Real-IP first.
+// clientIPFromRequest extracts client IP. X-Forwarded-For and X-Real-IP
+// headers are only trusted when the direct connection originates from loopback
+// (a local reverse proxy like nginx/caddy); direct clients use RemoteAddr to prevent spoofing.
 func clientIPFromRequest(r *http.Request) string {
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		if idx := strings.Index(xff, ","); idx != -1 {
-			return strings.TrimSpace(xff[:idx])
-		}
-		return strings.TrimSpace(xff)
-	}
-	if xrip := r.Header.Get("X-Real-IP"); xrip != "" {
-		return strings.TrimSpace(xrip)
-	}
 	ip, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		if r.RemoteAddr != "" {
-			return r.RemoteAddr
+			ip = r.RemoteAddr
+		} else {
+			ip = "unknown"
 		}
-		return "unknown"
+	}
+	if ip == "127.0.0.1" || ip == "::1" {
+		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+			if idx := strings.Index(xff, ","); idx != -1 {
+				return strings.TrimSpace(xff[:idx])
+			}
+			return strings.TrimSpace(xff)
+		}
+		if xrip := r.Header.Get("X-Real-IP"); xrip != "" {
+			return strings.TrimSpace(xrip)
+		}
 	}
 	return ip
 }

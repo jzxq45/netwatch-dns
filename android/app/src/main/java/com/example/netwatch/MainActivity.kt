@@ -69,18 +69,29 @@ class MainActivity : AppCompatActivity() {
         s.cacheMode = WebSettings.LOAD_DEFAULT
         webView.webViewClient = object : WebViewClient() {
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
-                // Всё остаётся внутри приложения: внешний браузер не вызываем.
-                val scheme = request.url.scheme ?: ""
-                return scheme != "http" && scheme != "https"
+                val target = request.url
+                val scheme = target.scheme ?: ""
+                if (scheme != "http" && scheme != "https") {
+                    return true
+                }
+                val serverUri = android.net.Uri.parse(url())
+                // External addresses (such as router admin panels) open in the system browser
+                if (target.host != serverUri.host || target.port != serverUri.port) {
+                    try {
+                        startActivity(Intent(Intent.ACTION_VIEW, target))
+                        return true
+                    } catch (_: Exception) {}
+                }
+                return false
             }
 
             override fun onPageFinished(view: WebView, url: String) {
                 progress.visibility = View.GONE
                 val token = prefs.getString("api_token", "") ?: ""
                 if (token.isNotBlank()) {
-                    val safe = token.replace("'", "")
+                    val jsonSafe = org.json.JSONObject.quote(token)
                     view.evaluateJavascript(
-                        "localStorage.setItem('auth_token', '$safe');", null
+                        "localStorage.setItem('auth_token', $jsonSafe);", null
                     )
                 }
             }
@@ -90,6 +101,11 @@ class MainActivity : AppCompatActivity() {
             ) {
                 if (request.isForMainFrame) showError()
             }
+        }
+        webView.setDownloadListener { downloadUrl, _, _, _, _ ->
+            try {
+                startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse(downloadUrl)))
+            } catch (_: Exception) {}
         }
         swipe.setOnRefreshListener { webView.reload() }
         swipe.isRefreshing = false

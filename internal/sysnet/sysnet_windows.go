@@ -9,7 +9,9 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"syscall"
+	"time"
 
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
@@ -21,19 +23,32 @@ const (
 	firewallRuleWebUI = "NetWatch Web UI"
 )
 
+var (
+	netInfoMu      sync.Mutex
+	cachedNetInfo  NetworkInfo
+	netInfoExpires time.Time
+)
+
 func GetNetworkInfo() NetworkInfo {
+	netInfoMu.Lock()
+	defer netInfoMu.Unlock()
+	if time.Now().Before(netInfoExpires) {
+		return cachedNetInfo
+	}
 	lanIP := OutboundLANIP()
 	gatewayIP := detectGatewayWindows()
 	if gatewayIP == "" {
 		gatewayIP = FallbackGateway(lanIP)
 	}
-	return NetworkInfo{
+	cachedNetInfo = NetworkInfo{
 		LANIP:           lanIP,
 		GatewayIP:       gatewayIP,
 		LocalDNSEnabled: IsLocalDNSActive(),
 		Autostart:       IsAutostartEnabled(),
 		FirewallAllowed: IsFirewallAllowed(),
 	}
+	netInfoExpires = time.Now().Add(15 * time.Second)
+	return cachedNetInfo
 }
 
 // EnsureFirewallRules adds inbound UDP/53 and TCP/8080 rules when missing.
@@ -99,6 +114,10 @@ func IsAutostartEnabled() bool {
 }
 
 func SetAutostart(enabled bool) error {
+	netInfoMu.Lock()
+	netInfoExpires = time.Time{}
+	netInfoMu.Unlock()
+
 	k, err := registry.OpenKey(registry.CURRENT_USER, `Software\Microsoft\Windows\CurrentVersion\Run`, registry.SET_VALUE)
 	if err != nil {
 		return fmt.Errorf("open registry run key: %w", err)
@@ -121,7 +140,7 @@ func SetAutostart(enabled bool) error {
 
 func detectGatewayWindows() string {
 	cmd := exec.Command("powershell", "-NoProfile", "-Command",
-		"(Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue | Select-Object -First 1).NextHop")
+		"(Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue | Sort-Object RouteMetric | Select-Object -First 1).NextHop")
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	out, err := cmd.Output()
 	if err != nil {
@@ -146,10 +165,14 @@ func IsLocalDNSActive() bool {
 }
 
 func SetLocalDNS(enabled bool) error {
+	netInfoMu.Lock()
+	netInfoExpires = time.Time{}
+	netInfoMu.Unlock()
+
 	var script string
 	if enabled {
 		script = `
-$r = Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue | Select-Object -First 1
+$r = Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue | Sort-Object RouteMetric | Select-Object -First 1
 if ($r) {
     Set-DnsClientServerAddress -InterfaceIndex $r.InterfaceIndex -ServerAddresses ('127.0.0.1') -ErrorAction Stop
 } else {
@@ -158,7 +181,7 @@ if ($r) {
 `
 	} else {
 		script = `
-$r = Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue | Select-Object -First 1
+$r = Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue | Sort-Object RouteMetric | Select-Object -First 1
 if ($r) {
     Set-DnsClientServerAddress -InterfaceIndex $r.InterfaceIndex -ResetServerAddresses -ErrorAction Stop
 } else {

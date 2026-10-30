@@ -33,9 +33,46 @@ func main() {
 	os.Exit(run())
 }
 
+const appMutexName = "Local\\NetWatchDNS_SingleInstanceMutex"
+
+func acquireSingleInstance() (uintptr, bool) {
+	kernel32 := syscall.NewLazyDLL("kernel32.dll")
+	procCreateMutexW := kernel32.NewProc("CreateMutexW")
+	namePtr, _ := syscall.UTF16PtrFromString(appMutexName)
+	hMutex, _, err := procCreateMutexW.Call(0, 1, uintptr(unsafe.Pointer(namePtr)))
+	const errorAlreadyExists = 183
+	if errno, ok := err.(syscall.Errno); ok && errno == errorAlreadyExists {
+		return hMutex, false
+	}
+	return hMutex, true
+}
+
+func activateExistingWindow() {
+	user32 := syscall.NewLazyDLL("user32.dll")
+	procFindWindowW := user32.NewProc("FindWindowW")
+	procShowWindow := user32.NewProc("ShowWindow")
+	procSetForegroundWindow := user32.NewProc("SetForegroundWindow")
+
+	titlePtr, _ := syscall.UTF16PtrFromString("netwatch-dns — DNS monitor")
+	hwnd, _, _ := procFindWindowW.Call(0, uintptr(unsafe.Pointer(titlePtr)))
+	if hwnd != 0 {
+		_, _, _ = procShowWindow.Call(hwnd, 9) // SW_RESTORE
+		_, _, _ = procSetForegroundWindow.Call(hwnd)
+	} else {
+		alert("netwatch-dns", "Приложение уже запущено и работает в фоновом режиме (проверьте системный трей).")
+	}
+}
+
 func run() int {
 	cfgPath := flag.String("config", "monitor.yaml", "path to config file")
 	flag.Parse()
+
+	hMutex, isFirst := acquireSingleInstance()
+	if !isFirst {
+		activateExistingWindow()
+		return 0
+	}
+	defer syscall.CloseHandle(syscall.Handle(hMutex))
 
 	logFile := openLogFile()
 	slog.SetDefault(slog.New(slog.NewTextHandler(logFile, &slog.HandlerOptions{Level: slog.LevelInfo})))
