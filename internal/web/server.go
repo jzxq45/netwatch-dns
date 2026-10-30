@@ -46,6 +46,7 @@ type Store interface {
 	DeviceByIP(ctx context.Context, ip string) (*store.DeviceRow, error)
 	DeviceEvents(ctx context.Context, ip string, limit int) ([]store.Event, error)
 	ListDevices(ctx context.Context) ([]store.DeviceRow, error)
+	DeviceActivity(ctx context.Context, sinceTS int64) (map[string]store.DeviceActivitySummary, error)
 	TopDomains(ctx context.Context, sinceTS int64, limit int) ([]store.TopRow, error)
 	Stats24h(ctx context.Context) (store.StatsSummary, error)
 	SetDeviceHostname(ctx context.Context, ip string, hostname string) error
@@ -86,6 +87,7 @@ func New(st Store, log *slog.Logger) *Server {
 	}
 	mux.HandleFunc("GET /{$}", s.feed)
 	mux.HandleFunc("GET /devices", s.devices)
+	mux.HandleFunc("GET /api/devices/audit", s.apiDevicesAudit)
 	mux.HandleFunc("GET /device", s.deviceLog)
 	mux.HandleFunc("GET /top", s.top)
 	mux.HandleFunc("GET /static/", s.static)
@@ -390,14 +392,27 @@ const contentDevices = `
 {{if .Data.Devices}}
 <div class="cards">{{range .Data.Devices}}
   <div class="dev-card">
-    <div style="display:flex;justify-content:space-between;align-items:center">
-      <a class="ip" href="/device?ip={{.IP}}">{{.IP}}</a>
-      {{$v := vendor .MAC}}{{if $v}}<span class="badge dns">{{$v}}</span>{{end}}
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:.5rem">
+      <div style="display:flex;align-items:center;gap:.5rem;min-width:0">
+        <span style="font-size:1.6rem;line-height:1">{{.Profile.Icon}}</span>
+        <div style="min-width:0">
+          <a class="ip" href="/device?ip={{.IP}}" style="display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{if .Hostname}}{{.Hostname}}{{else}}{{.IP}}{{end}}</a>
+          {{if .Profile.Vendor}}<span class="badge dns">{{.Profile.Vendor}}</span>{{end}}
+        </div>
+      </div>
+      <span class="chip" style="font-family:var(--mono)">{{.IP}}</span>
     </div>
     <div class="attrs">
-      {{if .Hostname}}<span class="chip" style="color:var(--text);font-weight:600">{{.Hostname}}</span>{{end}}
       {{if .MAC}}<span class="chip">{{.MAC}}</span>{{end}}
+      <span class="chip">{{.Profile.Type}}</span>
     </div>
+    <div style="margin-top:.55rem;display:flex;justify-content:space-between;align-items:center;gap:.5rem;flex-wrap:wrap">
+      <span style="font-weight:600;color:{{.Privacy.GradeColor}}">{{.GradeIcon}} Рейтинг: {{.Privacy.Grade}} ({{.Privacy.Score}}/100)</span>
+      <span class="mute" style="font-size:.8rem">{{.Advice}}</span>
+    </div>
+    <div class="bar" style="margin-top:.4rem;height:7px"><span style="width:{{.Privacy.Score}}%;background:{{.Privacy.GradeColor}}"></span></div>
+    <div class="seen" style="display:block;margin-top:.45rem">Запросов: <b>{{.Total}}</b> · Обезврежено: <b>{{.Blocked}}</b> ({{.BlockPct}}%)</div>
+    {{if .Privacy.LeakCategories}}<div class="attrs" style="margin-top:.5rem">{{range .Privacy.LeakCategories}}<span class="chip" style="font-size:.75rem">{{.}}</span>{{end}}</div>{{end}}
     <span class="seen">активность: <span data-ts="{{.LastSeen}}">{{tsfmt .LastSeen}}</span></span>
   </div>{{end}}
 </div>
@@ -527,15 +542,126 @@ func (s *Server) feed(w http.ResponseWriter, r *http.Request) {
 	}{events, showAll, hidden})
 }
 
+// deviceCardView is the privacy X-Ray card model for /devices.
+type deviceCardView struct {
+	store.DeviceRow
+	Profile   devices.DeviceProfile
+	Privacy   devices.PrivacyScore
+	GradeIcon string
+	Advice    string
+	Total     int64
+	Blocked   int64
+	BlockPct  int
+}
+
 func (s *Server) devices(w http.ResponseWriter, r *http.Request) {
 	ds, err := s.st.ListDevices(r.Context())
 	if err != nil {
 		s.fail(w, "devices list", err)
 		return
 	}
+	since := time.Now().Add(-24 * time.Hour).Unix()
+	act, err := s.st.DeviceActivity(r.Context(), since)
+	if err != nil {
+		s.fail(w, "device activity", err)
+		return
+	}
+	views := make([]deviceCardView, 0, len(ds))
+	for _, d := range ds {
+		a := act[d.IP]
+		prof := devices.ProfileDevice(d.MAC, d.Hostname)
+		priv := devices.CalculatePrivacyScore(a.Total, a.Blocked, a.TopDomains)
+		pct := 0
+		if a.Total > 0 {
+			pct = int(a.Blocked * 100 / a.Total)
+		}
+		views = append(views, deviceCardView{
+			DeviceRow: d,
+			Profile:   prof,
+			Privacy:   priv,
+			GradeIcon: devices.GradeIcon(priv.Grade),
+			Advice:    devices.GradeAdvice(priv.Grade),
+			Total:     a.Total,
+			Blocked:   a.Blocked,
+			BlockPct:  pct,
+		})
+	}
 	s.render(w, http.StatusOK, page(contentDevices), "/devices", struct {
-		Devices []store.DeviceRow
-	}{ds})
+		Devices []deviceCardView
+	}{views})
+}
+
+// auditProfile is the JSON identity of one client in /api/devices/audit.
+type auditProfile struct {
+	Type   string `json:"type"`
+	Icon   string `json:"icon"`
+	Vendor string `json:"vendor"`
+}
+
+// auditPrivacy is the JSON privacy X-ray block in /api/devices/audit.
+type auditPrivacy struct {
+	Score          int      `json:"score"`
+	Grade          string   `json:"grade"`
+	GradeColor     string   `json:"grade_color"`
+	LeakCategories []string `json:"leak_categories"`
+	Total          int64    `json:"total"`
+	Blocked        int64    `json:"blocked"`
+	BlockPct       float64  `json:"block_pct"`
+}
+
+// auditDevice is one row of the /api/devices/audit response.
+type auditDevice struct {
+	IP       string       `json:"ip"`
+	MAC      string       `json:"mac"`
+	Hostname string       `json:"hostname"`
+	LastSeen int64        `json:"last_seen"`
+	Profile  auditProfile `json:"profile"`
+	Privacy  auditPrivacy `json:"privacy"`
+}
+
+func (s *Server) apiDevicesAudit(w http.ResponseWriter, r *http.Request) {
+	ds, err := s.st.ListDevices(r.Context())
+	if err != nil {
+		s.fail(w, "devices list", err)
+		return
+	}
+	since := time.Now().Add(-24 * time.Hour).Unix()
+	act, err := s.st.DeviceActivity(r.Context(), since)
+	if err != nil {
+		s.fail(w, "device activity", err)
+		return
+	}
+	out := make([]auditDevice, 0, len(ds))
+	for _, d := range ds {
+		a := act[d.IP]
+		prof := devices.ProfileDevice(d.MAC, d.Hostname)
+		priv := devices.CalculatePrivacyScore(a.Total, a.Blocked, a.TopDomains)
+		cats := priv.LeakCategories
+		if cats == nil {
+			cats = []string{}
+		}
+		pct := 0.0
+		if a.Total > 0 {
+			pct = float64(a.Blocked) * 100 / float64(a.Total)
+		}
+		out = append(out, auditDevice{
+			IP:       d.IP,
+			MAC:      d.MAC,
+			Hostname: d.Hostname,
+			LastSeen: d.LastSeen,
+			Profile:  auditProfile{Type: string(prof.Type), Icon: prof.Icon, Vendor: prof.Vendor},
+			Privacy: auditPrivacy{
+				Score:          priv.Score,
+				Grade:          priv.Grade,
+				GradeColor:     priv.GradeColor,
+				LeakCategories: cats,
+				Total:          a.Total,
+				Blocked:        a.Blocked,
+				BlockPct:       pct,
+			},
+		})
+	}
+	_ = json.NewEncoder(w).Encode(out) //nolint:errcheck // client may vanish mid-write
 }
 
 func (s *Server) deviceLog(w http.ResponseWriter, r *http.Request) {

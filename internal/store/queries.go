@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -251,6 +252,78 @@ func (s *Store) HourlyActivity(ctx context.Context, sinceTS int64) ([]HourlyBuck
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate hourly activity: %w", err)
+	}
+	return out, nil
+}
+
+// DeviceActivitySummary is the 24h DNS footprint of one client for the
+// privacy X-ray: how much it queried, how much the server neutralized and a
+// sample of the blocked domains used to classify the leak categories.
+type DeviceActivitySummary struct {
+	IP         string
+	Total      int64
+	Blocked    int64
+	TopDomains []string
+}
+
+// deviceSampleDomains caps how many blocked domains per client feed the
+// category classifier (enough signal, no unbounded map growth).
+const deviceSampleDomains = 5
+
+// DeviceActivity aggregates dns_log per client since sinceTS: total queries,
+// noise-flagged (blocked/AI) queries and up to 5 of the most frequent blocked
+// domains per client. Devices with no traffic in the window are absent.
+func (s *Store) DeviceActivity(ctx context.Context, sinceTS int64) (map[string]DeviceActivitySummary, error) {
+	rows, err := s.read.QueryContext(ctx, `
+		SELECT client_ip,
+		       COUNT(*) AS total,
+		       COALESCE(SUM(CASE WHEN noise = 1 THEN 1 ELSE 0 END), 0) AS blocked
+		FROM dns_log
+		WHERE ts >= ?
+		GROUP BY client_ip`, sinceTS)
+	if err != nil {
+		return nil, fmt.Errorf("device activity: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	out := make(map[string]DeviceActivitySummary)
+	for rows.Next() {
+		var a DeviceActivitySummary
+		if err := rows.Scan(&a.IP, &a.Total, &a.Blocked); err != nil {
+			return nil, fmt.Errorf("scan device activity: %w", err)
+		}
+		out[a.IP] = a
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate device activity: %w", err)
+	}
+
+	sampleRows, err := s.read.QueryContext(ctx, `
+		SELECT client_ip, domain, COUNT(*) AS cnt
+		FROM dns_log
+		WHERE ts >= ? AND noise = 1
+		GROUP BY client_ip, domain
+		ORDER BY client_ip, cnt DESC`, sinceTS)
+	if err != nil {
+		return nil, fmt.Errorf("device activity samples: %w", err)
+	}
+	defer func() { _ = sampleRows.Close() }()
+
+	for sampleRows.Next() {
+		var ip, domain string
+		var cnt int64
+		if err := sampleRows.Scan(&ip, &domain, &cnt); err != nil {
+			return nil, fmt.Errorf("scan device sample: %w", err)
+		}
+		a, ok := out[ip]
+		if !ok || len(a.TopDomains) >= deviceSampleDomains {
+			continue
+		}
+		a.TopDomains = append(a.TopDomains, strings.TrimSuffix(domain, "."))
+		out[ip] = a
+	}
+	if err := sampleRows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate device samples: %w", err)
 	}
 	return out, nil
 }

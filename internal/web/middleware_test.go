@@ -41,6 +41,9 @@ func (failingStore) DeviceEvents(context.Context, string, int) ([]store.Event, e
 func (failingStore) ListDevices(context.Context) ([]store.DeviceRow, error) {
 	return nil, fixtureErr
 }
+func (failingStore) DeviceActivity(context.Context, int64) (map[string]store.DeviceActivitySummary, error) {
+	return nil, fixtureErr
+}
 func (failingStore) TopDomains(context.Context, int64, int) ([]store.TopRow, error) {
 	return nil, fixtureErr
 }

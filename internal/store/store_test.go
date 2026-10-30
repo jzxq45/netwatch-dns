@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -207,5 +208,100 @@ func TestHourlyActivity(t *testing.T) {
 	}
 	if len(empty) != 0 {
 		t.Fatalf("empty buckets = %+v, want none", empty)
+	}
+}
+
+func TestDeviceActivity(t *testing.T) {
+	t.Parallel()
+	s, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("store open: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+
+	now := time.Now().Unix()
+	seed := []struct {
+		ip     string
+		domain string
+		ts     int64
+		noise  int
+	}{
+		{"192.168.1.10", "example.com.", now - 60, 0},
+		{"192.168.1.10", "ads.example.com.", now - 50, 1},
+		{"192.168.1.10", "doubleclick.net.", now - 40, 1},
+		{"192.168.1.10", "doubleclick.net.", now - 30, 1},
+		{"192.168.1.11", "example.com.", now - 20, 0},
+		// Outside the window: ignored entirely.
+		{"192.168.1.12", "old.example.org.", now - 25*3600, 1},
+	}
+	for _, row := range seed {
+		if _, err := s.write.ExecContext(ctx,
+			`INSERT INTO dns_log (client_ip, domain, qtype, ts, noise) VALUES (?,?,?,?,?)`,
+			row.ip, row.domain, "A", row.ts, row.noise); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+	}
+
+	got, err := s.DeviceActivity(ctx, now-24*3600)
+	if err != nil {
+		t.Fatalf("device activity: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("devices = %d, want 2 (%+v)", len(got), got)
+	}
+	a := got["192.168.1.10"]
+	if a.Total != 4 || a.Blocked != 3 {
+		t.Errorf("192.168.1.10 total/blocked = %d/%d, want 4/3", a.Total, a.Blocked)
+	}
+	if len(a.TopDomains) != 2 {
+		t.Errorf("top domains = %v, want 2 unique blocked domains", a.TopDomains)
+	}
+	if len(a.TopDomains) > 0 && a.TopDomains[0] != "doubleclick.net" {
+		t.Errorf("top domain[0] = %q, want doubleclick.net (most frequent)", a.TopDomains[0])
+	}
+	b := got["192.168.1.11"]
+	if b.Total != 1 || b.Blocked != 0 || len(b.TopDomains) != 0 {
+		t.Errorf("192.168.1.11 = %+v, want 1/0 no samples", b)
+	}
+
+	// Empty window: empty (non-nil) map.
+	empty, err := s.DeviceActivity(ctx, now+3600)
+	if err != nil {
+		t.Fatalf("empty device activity: %v", err)
+	}
+	if empty == nil || len(empty) != 0 {
+		t.Fatalf("empty map = %+v", empty)
+	}
+}
+
+func TestDeviceActivitySampleCap(t *testing.T) {
+	t.Parallel()
+	s, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("store open: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+
+	now := time.Now().Unix()
+	for i := 0; i < 8; i++ {
+		domain := fmt.Sprintf("blocked%d.example.", i)
+		if _, err := s.write.ExecContext(ctx,
+			`INSERT INTO dns_log (client_ip, domain, qtype, ts, noise) VALUES (?,?,?,?,?)`,
+			"192.168.1.20", domain, "A", now-int64(i), 1); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+	}
+	got, err := s.DeviceActivity(ctx, now-3600)
+	if err != nil {
+		t.Fatalf("device activity: %v", err)
+	}
+	a := got["192.168.1.20"]
+	if a.Total != 8 || a.Blocked != 8 {
+		t.Errorf("total/blocked = %d/%d, want 8/8", a.Total, a.Blocked)
+	}
+	if len(a.TopDomains) != deviceSampleDomains {
+		t.Errorf("sample domains = %v, want capped at %d", a.TopDomains, deviceSampleDomains)
 	}
 }
