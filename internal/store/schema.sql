@@ -32,6 +32,12 @@ CREATE TABLE IF NOT EXISTS custom_rules (
     created_at INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS dns_rewrites (
+    domain     TEXT PRIMARY KEY,
+    ip         TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS flow_log (
     id       INTEGER PRIMARY KEY AUTOINCREMENT,
     src_ip   TEXT,

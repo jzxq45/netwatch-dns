@@ -265,3 +265,19 @@ func negativeTTL(msg *dns.Msg) uint32 {
 	}
 	return 60
 }
+
+// Purge drops every cache entry (any qtype) for name — used when a rewrite
+// makes a stale cached upstream answer wrong the moment the mapping changes.
+func (c *dnsCache) Purge(name string) {
+	if c == nil {
+		return
+	}
+	prefix := strings.ToLower(strings.TrimSuffix(name, ".")) + "\x00"
+	c.mu.Lock()
+	for k := range c.entries {
+		if strings.HasPrefix(k, prefix) {
+			delete(c.entries, k)
+		}
+	}
+	c.mu.Unlock()
+}

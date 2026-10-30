@@ -30,6 +30,7 @@ import (
 	"unicode/utf8"
 
 	"monitor/internal/devices"
+	"monitor/internal/filter"
 	"monitor/internal/metrics"
 	"monitor/internal/store"
 	"monitor/internal/sysnet"
@@ -51,6 +52,9 @@ type Store interface {
 	ListCustomRules(ctx context.Context) ([]store.CustomRule, error)
 	SetCustomRule(ctx context.Context, domain string, action string) error
 	DeleteCustomRule(ctx context.Context, domain string) error
+	ListRewrites(ctx context.Context) ([]store.DNSRewrite, error)
+	SetRewrite(ctx context.Context, domain, ip string) error
+	DeleteRewrite(ctx context.Context, domain string) error
 }
 
 const (
@@ -93,6 +97,11 @@ func New(st Store, log *slog.Logger) *Server {
 	mux.HandleFunc("GET /api/rules", s.apiListRules)
 	mux.HandleFunc("POST /api/rules", s.apiSetRule)
 	mux.HandleFunc("DELETE /api/rules", s.apiDeleteRule)
+	mux.HandleFunc("GET /api/rewrites", s.apiListRewrites)
+	mux.HandleFunc("POST /api/rewrites", s.apiSetRewrite)
+	mux.HandleFunc("DELETE /api/rewrites", s.apiDeleteRewrite)
+	mux.HandleFunc("GET /api/services", s.apiServices)
+	mux.HandleFunc("POST /api/services/toggle", s.apiServiceToggle)
 	mux.HandleFunc("GET /api/network", s.apiNetwork)
 	mux.HandleFunc("POST /api/local-dns", s.apiSetLocalDNS)
 	mux.HandleFunc("POST /api/autostart", s.apiSetAutostart)
@@ -125,6 +134,9 @@ type Server struct {
 
 	// OnRuleChanged applies a saved/deleted custom rule to the live matcher.
 	OnRuleChanged func(domain, action string, deleted bool)
+
+	// OnRewriteChanged applies a saved/deleted DNS rewrite to the live map.
+	OnRewriteChanged func(domain, ip string, deleted bool)
 }
 
 func (s *Server) Broadcast(e store.Event) {
@@ -332,6 +344,23 @@ const contentFeed = `
     </div>
   </div>
   <div id="localDnsError" style="color:#ff8080;font-size:.82rem;margin-top:.4rem;display:none"></div>
+  <div id="servicesCard" style="display:none;margin-top:.8rem">
+    <div style="display:flex;align-items:center;gap:.5rem;flex-wrap:wrap">
+      <span style="font-weight:600">🎯 Быстрая блокировка:</span>
+      <span id="servicesList"></span>
+    </div>
+  </div>
+  <div id="rewritesCard" style="display:none;margin-top:.8rem">
+    <b>🧭 Локальные DNS-записи (rewrites)</b>
+    <div style="display:flex;gap:.5rem;margin-top:.5rem;flex-wrap:wrap;align-items:center">
+      <input type="text" class="chip" id="rwDomain" placeholder="домен, напр. nas.lan" style="min-width:14rem">
+      <input type="text" class="chip" id="rwIp" placeholder="IP, напр. 192.168.1.10" style="min-width:12rem">
+      <button class="chip link" id="btnAddRewrite" style="cursor:pointer">➕ Добавить</button>
+      <span id="rwError" style="color:#ff8080;font-size:.82rem;display:none"></span>
+    </div>
+    <table id="rwTable" style="margin-top:.5rem"><tbody></tbody></table>
+  </div>
+</div>
   <div id="phonePairCard" style="display:none;margin-top:.8rem;padding:.7rem .9rem;border:1px dashed var(--line);border-radius:var(--radius);font-size:.85rem">
     <b>📱 Мобильное приложение:</b> укажите адрес <span class="chip" id="phonePairAddr">http://...</span> в настройках Netwatch на телефоне (тот же Wi-Fi).
     <a class="chip link" href="/download/netwatch.apk" download style="margin-top:.4rem;display:inline-block">📥 Скачать NetWatch.apk</a>
@@ -937,6 +966,166 @@ func (s *Server) apiDeleteRule(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write([]byte(`{"status":"ok"}`))
+}
+
+// serviceStatus is one /api/services row: the catalog entry plus whether the
+// service is currently blocked (any of its domains has a block rule).
+type serviceStatus struct {
+	ID      string   `json:"id"`
+	Name    string   `json:"name"`
+	Main    string   `json:"main"`
+	Domains []string `json:"domains"`
+	Blocked bool     `json:"blocked"`
+}
+
+// apiServices returns the built-in 1-click catalog with live block status.
+func (s *Server) apiServices(w http.ResponseWriter, r *http.Request) {
+	rules, err := s.st.ListCustomRules(r.Context())
+	if err != nil {
+		s.fail(w, "api services", err)
+		return
+	}
+	blockedDomains := make(map[string]bool, len(rules))
+	for _, rule := range rules {
+		if rule.Action == store.RuleBlock {
+			blockedDomains[rule.Domain] = true
+		}
+	}
+	out := make([]serviceStatus, 0, len(filter.Services))
+	for _, svc := range filter.Services {
+		blocked := false
+		for _, d := range svc.Domains {
+			if blockedDomains[d] {
+				blocked = true
+				break
+			}
+		}
+		out = append(out, serviceStatus{
+			ID:      svc.ID,
+			Name:    svc.Name,
+			Main:    svc.Domains[0],
+			Domains: svc.Domains,
+			Blocked: blocked,
+		})
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(out) //nolint:errcheck // client may vanish mid-write
+}
+
+// apiServiceToggle applies or removes (at once) every block rule of one
+// catalog service. Store rows are written first, then the live matcher is
+// updated — a partial DB failure never leaves the matcher disagreeing with
+// what was attempted to persist.
+func (s *Server) apiServiceToggle(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		ID      string `json:"id"`
+		Blocked bool   `json:"blocked"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	svc, ok := filter.ServiceByID(strings.TrimSpace(body.ID))
+	if !ok {
+		http.Error(w, "unknown service id", http.StatusBadRequest)
+		return
+	}
+	for _, domain := range svc.Domains {
+		if body.Blocked {
+			if err := s.st.SetCustomRule(r.Context(), domain, store.RuleBlock); err != nil {
+				s.fail(w, "api service toggle", err)
+				return
+			}
+			if s.OnRuleChanged != nil {
+				s.OnRuleChanged(domain, store.RuleBlock, false)
+			}
+		} else {
+			if err := s.st.DeleteCustomRule(r.Context(), domain); err != nil {
+				s.fail(w, "api service toggle", err)
+				return
+			}
+			if s.OnRuleChanged != nil {
+				s.OnRuleChanged(domain, "", true)
+			}
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write([]byte(`{"status":"ok"}`))
+}
+
+// apiListRewrites returns all local DNS rewrites as JSON.
+func (s *Server) apiListRewrites(w http.ResponseWriter, r *http.Request) {
+	list, err := s.st.ListRewrites(r.Context())
+	if err != nil {
+		s.fail(w, "api list rewrites", err)
+		return
+	}
+	if list == nil {
+		list = []store.DNSRewrite{}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(list) //nolint:errcheck // client may vanish mid-write
+}
+
+// apiSetRewrite stores a local DNS override (domain -> IP) and applies it to
+// the live map.
+func (s *Server) apiSetRewrite(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Domain string `json:"domain"`
+		IP     string `json:"ip"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	domain := normalizeUserDomain(body.Domain)
+	ip := strings.TrimSpace(body.IP)
+	if domain == "" || len(domain) > maxDomainLen || !domainPattern.MatchString(domain) || net.ParseIP(ip) == nil {
+		http.Error(w, "invalid domain or ip", http.StatusBadRequest)
+		return
+	}
+	if err := s.st.SetRewrite(r.Context(), domain, ip); err != nil {
+		s.fail(w, "api set rewrite", err)
+		return
+	}
+	if s.OnRewriteChanged != nil {
+		s.OnRewriteChanged(domain, ip, false)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write([]byte(`{"status":"ok"}`))
+}
+
+// apiDeleteRewrite removes a local DNS override and its live map entry.
+func (s *Server) apiDeleteRewrite(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Domain string `json:"domain"`
+	}
+	if r.Body != nil {
+		_ = json.NewDecoder(r.Body).Decode(&body)
+	}
+	if body.Domain == "" {
+		body.Domain = r.URL.Query().Get("domain")
+	}
+	domain := normalizeUserDomain(body.Domain)
+	if domain == "" {
+		http.Error(w, "missing domain", http.StatusBadRequest)
+		return
+	}
+	if err := s.st.DeleteRewrite(r.Context(), domain); err != nil {
+		s.fail(w, "api delete rewrite", err)
+		return
+	}
+	if s.OnRewriteChanged != nil {
+		s.OnRewriteChanged(domain, "", true)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write([]byte(`{"status":"ok"}`))
+}
+
+// normalizeUserDomain lowercases, trims and drops a trailing dot so both the
+// store and the live DNS map see one canonical spelling.
+func normalizeUserDomain(domain string) string {
+	return strings.ToLower(strings.TrimSuffix(strings.TrimSpace(domain), "."))
 }
 
 func (s *Server) apiEventsStream(w http.ResponseWriter, r *http.Request) {

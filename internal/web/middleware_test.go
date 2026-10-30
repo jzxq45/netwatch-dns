@@ -47,6 +47,15 @@ func (failingStore) TopDomains(context.Context, int64, int) ([]store.TopRow, err
 func (failingStore) Stats24h(context.Context) (store.StatsSummary, error) {
 	return store.StatsSummary{}, fixtureErr
 }
+func (failingStore) ListRewrites(context.Context) ([]store.DNSRewrite, error) {
+	return nil, fixtureErr
+}
+func (failingStore) SetRewrite(context.Context, string, string) error {
+	return fixtureErr
+}
+func (failingStore) DeleteRewrite(context.Context, string) error {
+	return fixtureErr
+}
 func (failingStore) SetDeviceHostname(context.Context, string, string) error {
 	return fixtureErr
 }

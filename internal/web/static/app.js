@@ -56,6 +56,8 @@
     var valBlockedRules = document.getElementById('valBlockedRules');
     var valCacheRatio = document.getElementById('valCacheRatio');
     var valBlockPct = document.getElementById('valBlockPct');
+    var servicesCard = document.getElementById('servicesCard');
+    var servicesList = document.getElementById('servicesList');
     var btnPhonePair = document.getElementById('btnPhonePair');
     var phonePairCard = document.getElementById('phonePairCard');
     var phonePairAddr = document.getElementById('phonePairAddr');
@@ -117,6 +119,144 @@
         if (valCacheRatio) valCacheRatio.textContent = Math.round(stats.cache_hit_ratio || 0);
       })
       .catch(function () {});
+
+    // 1-click service blocking chips (YouTube, TikTok, ...).
+    fetch('/api/services')
+      .then(function (r) { return r.json(); })
+      .then(function (services) {
+        if (!Array.isArray(services) || !services.length || !servicesCard || !servicesList) return;
+        servicesCard.style.display = 'block';
+        servicesList.innerHTML = '';
+        services.forEach(function (svc) {
+          var btn = document.createElement('button');
+          btn.className = 'chip';
+          btn.style.cursor = 'pointer';
+          btn.title = svc.domains.join(', ');
+          function paint(svc2) {
+            if (svc2.blocked) {
+              btn.textContent = '🚫 ' + svc2.name;
+              btn.style.borderColor = '#ff8080';
+              btn.style.color = '#ff8080';
+            } else {
+              btn.textContent = svc2.name;
+              btn.style.borderColor = 'var(--line)';
+              btn.style.color = 'var(--text)';
+            }
+          }
+          paint(svc);
+          btn.addEventListener('click', function () {
+            btn.disabled = true;
+            fetch('/api/services/toggle', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ id: svc.id, blocked: !svc.blocked })
+            })
+            .then(function (r) {
+              if (!r.ok) throw new Error('Не удалось изменить блокировку');
+              svc.blocked = !svc.blocked;
+              paint(svc);
+            })
+            .catch(function () {})
+            .finally(function () { btn.disabled = false; });
+          });
+          servicesList.appendChild(btn);
+          var gap = document.createElement('span');
+          gap.textContent = ' ';
+          servicesList.appendChild(gap);
+        });
+      })
+      .catch(function () {});
+
+    // Local DNS rewrites: table + quick add/delete.
+    var rwCard = document.getElementById('rewritesCard');
+    if (rwCard) {
+      rwCard.style.display = 'block';
+      var rwDomain = document.getElementById('rwDomain');
+      var rwIp = document.getElementById('rwIp');
+      var btnAddRewrite = document.getElementById('btnAddRewrite');
+      var rwError = document.getElementById('rwError');
+      var rwTbody = rwCard.querySelector('#rwTable tbody');
+
+      function showRwError(msg) {
+        rwError.textContent = msg || '';
+        rwError.style.display = msg ? 'inline' : 'none';
+      }
+
+      function renderRewrites(list) {
+        rwTbody.innerHTML = '';
+        if (!Array.isArray(list) || !list.length) {
+          var empty = document.createElement('tr');
+          empty.innerHTML = '<td class="mute" style="padding:.3rem 0">Записей пока нет — добавьте домен и IP внутренней сети.</td>';
+          rwTbody.appendChild(empty);
+          return;
+        }
+        list.forEach(function (rw) {
+          var tr = document.createElement('tr');
+          var safeDom = escapeHTML(rw.domain);
+          var safeIp = escapeHTML(rw.ip);
+          tr.innerHTML = '<td style="padding:.25rem 1rem .25rem 0"><span class="chip">' + safeDom + '</span></td>' +
+            '<td style="padding:.25rem 1rem .25rem 0"><span class="chip" style="font-family:var(--mono)">' + safeIp + '</span></td>' +
+            '<td><button class="chip link btn-rw-del" data-dom="' + safeDom + '" title="Удалить запись" style="cursor:pointer">🗑</button></td>';
+          rwTbody.appendChild(tr);
+        });
+      }
+
+      function loadRewrites() {
+        fetch('/api/rewrites')
+          .then(function (r) { return r.json(); })
+          .then(renderRewrites)
+          .catch(function () {});
+      }
+      loadRewrites();
+
+      btnAddRewrite.addEventListener('click', function () {
+        var domain = rwDomain.value.trim();
+        var ip = rwIp.value.trim();
+        showRwError('');
+        if (!domain || !ip) {
+          showRwError('Укажите домен и IP');
+          return;
+        }
+        btnAddRewrite.disabled = true;
+        fetch('/api/rewrites', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ domain: domain, ip: ip })
+        })
+        .then(function (r) {
+          if (!r.ok) {
+            return r.text().then(function (t) { throw new Error(t || 'Ошибка сохранения'); });
+          }
+          rwDomain.value = '';
+          rwIp.value = '';
+          loadRewrites();
+        })
+        .catch(function (e) {
+          showRwError(e.message || 'Ошибка сохранения');
+        })
+        .finally(function () { btnAddRewrite.disabled = false; });
+      });
+
+      rwTbody.addEventListener('click', function (ev) {
+        var btn = ev.target.closest('.btn-rw-del');
+        if (!btn) return;
+        var dom = btn.getAttribute('data-dom');
+        if (!dom) return;
+        btn.disabled = true;
+        fetch('/api/rewrites', {
+          method: 'DELETE',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ domain: dom })
+        })
+        .then(function (r) {
+          if (!r.ok) throw new Error('Не удалось удалить');
+          loadRewrites();
+        })
+        .catch(function () {
+          btn.disabled = false;
+        });
+      });
+    }
 
     if (btnPhonePair && phonePairCard) {
       btnPhonePair.addEventListener('click', function () {

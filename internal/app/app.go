@@ -69,6 +69,27 @@ func Run(ctx context.Context, cfg config.Config) error {
 		dnsSrv.ApplyCustomRule(domain, action)
 	}
 
+	// Local DNS rewrites (A/AAAA overrides) load into the live map at startup
+	// and follow the web layer from then on.
+	rewrites, err := db.ListRewrites(ctx)
+	if err != nil {
+		slog.Warn("load rewrites", "err", err)
+	} else {
+		for _, rw := range rewrites {
+			dnsSrv.ApplyRewrite(rw.Domain, rw.IP)
+		}
+		if len(rewrites) > 0 {
+			slog.Info("rewrites loaded", "count", len(rewrites))
+		}
+	}
+	w.OnRewriteChanged = func(domain, ip string, deleted bool) {
+		if deleted {
+			dnsSrv.RemoveRewrite(domain)
+			return
+		}
+		dnsSrv.ApplyRewrite(domain, ip)
+	}
+
 	dnsSrv.OnRecord = func(rec dnssrv.Record) {
 		devRes.Feed(devices.Record{ClientIP: rec.ClientIP, TS: rec.TS})
 		w.Broadcast(store.Event{

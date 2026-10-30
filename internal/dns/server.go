@@ -126,6 +126,12 @@ type Server struct {
 	prefetchMu  sync.Mutex
 	prefetching map[string]struct{}
 
+	// rewrites holds local A/AAAA overrides (domain -> ip). Written by the
+	// web layer via ApplyRewrite/RemoveRewrite, read on every exchange:
+	// RWMutex, never nil after New.
+	rewritesMu sync.RWMutex
+	rewrites   map[string]string
+
 	// inflight bounds concurrent handlers (admission control; DNSInflight is
 	// the observable mirror).
 	inflight atomic.Int64
@@ -202,6 +208,7 @@ func New(cfg Config, db *sql.DB, log *slog.Logger) *Server {
 		dohClient:        &http.Client{Timeout: upstreamTO},
 		cache:            newDNSCache(10000),
 		prefetching:      make(map[string]struct{}),
+		rewrites:         make(map[string]string),
 	}
 }
 
@@ -260,6 +267,98 @@ func (s *Server) ApplyCustomRule(domain, action string) {
 // RemoveCustomRule drops a runtime override from both rule sets.
 func (s *Server) RemoveCustomRule(domain string) {
 	s.blockMatcher.RemoveRule(domain)
+}
+
+// rewriteTTL is the TTL for locally synthesized rewrite answers.
+const rewriteTTL = 300
+
+// ApplyRewrite installs a local A/AAAA override for domain. Any stale cache
+// entry for the name is purged so the new mapping is served immediately.
+func (s *Server) ApplyRewrite(domain, ip string) {
+	domain = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(domain), "."))
+	if domain == "" {
+		return
+	}
+	s.rewritesMu.Lock()
+	s.rewrites[domain] = ip
+	s.rewritesMu.Unlock()
+	s.cache.Purge(domain)
+}
+
+// RemoveRewrite drops the local override; the domain resolves normally again.
+func (s *Server) RemoveRewrite(domain string) {
+	domain = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(domain), "."))
+	if domain == "" {
+		return
+	}
+	s.rewritesMu.Lock()
+	delete(s.rewrites, domain)
+	s.rewritesMu.Unlock()
+	s.cache.Purge(domain)
+}
+
+// lookupRewrite returns the rewrite target for name (exact match first, then
+// parent domain suffixes — a rewrite of example.com also covers its hosts).
+func (s *Server) lookupRewrite(name string) (string, bool) {
+	name = strings.ToLower(strings.TrimSuffix(name, "."))
+	if name == "" {
+		return "", false
+	}
+	s.rewritesMu.RLock()
+	defer s.rewritesMu.RUnlock()
+	for n := name; ; {
+		if ip, ok := s.rewrites[n]; ok {
+			return ip, true
+		}
+		i := strings.IndexByte(n, '.')
+		if i < 0 {
+			return "", false
+		}
+		n = n[i+1:]
+	}
+}
+
+// rewriteResponse builds the authoritative answer for a matched rewrite:
+// the mapped A/AAAA value when the address family matches the query type,
+// otherwise empty authoritative NOERROR (RFC NODATA) when it does not.
+// nil = no rewrite applied, the caller resolves normally.
+func (s *Server) rewriteResponse(r *dns.Msg) *dns.Msg {
+	if s == nil {
+		return nil
+	}
+	q := r.Question[0]
+	target, ok := s.lookupRewrite(q.Name)
+	if !ok {
+		return nil
+	}
+	ip := net.ParseIP(target)
+	if ip == nil {
+		// Broken mapping (e.g. legacy DB row): fall through to the normal path.
+		s.log.Warn("dns rewrite broken ip", "domain", q.Name, "ip", target)
+		return nil
+	}
+	resp := new(dns.Msg)
+	resp.SetReply(r)
+	resp.Authoritative = true
+	switch q.Qtype {
+	case dns.TypeA:
+		if v4 := ip.To4(); v4 != nil {
+			resp.Answer = []dns.RR{&dns.A{
+				Hdr: dns.RR_Header{Name: q.Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: rewriteTTL},
+				A:   v4,
+			}}
+		}
+	case dns.TypeAAAA:
+		if ip.To4() == nil {
+			resp.Answer = []dns.RR{&dns.AAAA{
+				Hdr:  dns.RR_Header{Name: q.Name, Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: rewriteTTL},
+				AAAA: ip.To16(),
+			}}
+		}
+	}
+	// Any other qtype (or family mismatch) keeps NOERROR without answers:
+	// the name exists locally, records of that type do not (NODATA).
+	return resp
 }
 
 // isBlocked reports whether name is in the blocklist (exact or parent domain).
@@ -568,7 +667,10 @@ func (s *Server) handle(w dns.ResponseWriter, r *dns.Msg) {
 		return
 	}
 
-	blocked := s.isBlocked(q.Name)
+	// Local rewrite wins over everything below (blocklist + upstream): the
+	// answer is synthesized here and no external resolver is contacted.
+	rewritten := s.rewriteResponse(r)
+	blocked := rewritten == nil && s.isBlocked(q.Name)
 	noisy := s.isNoise(domain)
 	if noisy {
 		// noise=1 rows land in the DB (intel) but never in stdout Info.
@@ -595,6 +697,13 @@ func (s *Server) handle(w dns.ResponseWriter, r *dns.Msg) {
 		metrics.LogRowsRejectedTotal.Add(1)
 		s.log.Warn("dns queue full, record dropped", "client", srcIP, "domain", domain)
 	}
+	if rewritten != nil {
+		// The row above is already queued in the sink / devices feed as
+		// regular (non-noise) traffic. Answer authoritatively and finish:
+		// no upstream, no blocklist evaluation beyond the (nil) check.
+		_ = w.WriteMsg(rewritten)
+		return
+	}
 	if blocked {
 		metrics.DNSBlockedTotal.Add(1)
 		// DoH endpoints are answered NXDOMAIN here; the request itself is
@@ -618,6 +727,13 @@ func (s *Server) handle(w dns.ResponseWriter, r *dns.Msg) {
 
 func (s *Server) exchange(r *dns.Msg) (resp *dns.Msg, err error) {
 	q := r.Question[0]
+
+	// Rewrites bypass the cache and upstream entirely: every call answers
+	// authoritatively from the current mapping (fresh values, no staleness).
+	if rewritten := s.rewriteResponse(r); rewritten != nil {
+		return rewritten, nil
+	}
+
 	cacheKey := fmt.Sprintf("%s:%d", strings.ToLower(strings.TrimSuffix(q.Name, ".")), q.Qtype)
 
 	// Client's EDNS0 UDP payload size (RFC 6891), sent downstream when the
@@ -709,7 +825,7 @@ func (s *Server) resolveUpstream(q dns.Question, ednsSize uint16) (*dns.Msg, err
 
 	// Circuit breaker: if primary is in cooldown, query fallback directly to avoid 2-4s timeout penalty
 	if hasFallback && now < s.fallbackUntil.Load() {
-		resp, err := s.tryUpstream(msg, s.fallbackUpstream)
+		resp, err := s.tryUpstream(context.Background(), msg, s.fallbackUpstream)
 		if err == nil {
 			return resp, nil
 		}
@@ -717,41 +833,94 @@ func (s *Server) resolveUpstream(q dns.Question, ednsSize uint16) (*dns.Msg, err
 		s.fallbackUntil.Store(0)
 	}
 
-	resp, err := s.tryUpstream(msg, s.upstream)
+	if hasFallback {
+		// Healthy state: race both upstreams in parallel and take the first
+		// successful answer (fastest-upstream, AdGuard "parallel" mode).
+		return s.raceUpstreams(msg)
+	}
+
+	resp, err := s.tryUpstream(context.Background(), msg, s.upstream)
 	if err != nil {
-		if hasFallback {
-			s.log.Warn("primary upstream failed, trying fallback",
-				"upstream", s.upstream, "fallback", s.fallbackUpstream, "err", err)
-			fails := s.consecutiveFails.Add(1)
-			if fails >= 3 {
-				// Trip circuit breaker: route directly to fallback for 30s
-				s.fallbackUntil.Store(time.Now().Add(30 * time.Second).Unix())
-			}
-			resp, err = s.tryUpstream(msg, s.fallbackUpstream)
-			if err != nil {
-				return nil, err
-			}
-			s.consecutiveFails.Store(0)
-			return resp, nil
-		}
 		return nil, err
 	}
 	s.consecutiveFails.Store(0)
-	s.fallbackUntil.Store(0)
 	return resp, nil
 }
 
+// raceResult marks which upstream a parallel attempt belongs to.
+type raceResult struct {
+	fallback bool
+	resp     *dns.Msg
+	err      error
+}
+
+// raceUpstreams asks primary and fallback simultaneously and returns the
+// first non-error answer; the slower exchange is cancelled via ctx so it
+// cannot linger for its full timeout. Both failed → the last error.
+func (s *Server) raceUpstreams(msg *dns.Msg) (*dns.Msg, error) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	ch := make(chan raceResult, 2) // buffered: the cancelled loser still reports
+	go func() {
+		resp, err := s.tryUpstream(ctx, msg, s.upstream)
+		ch <- raceResult{resp: resp, err: err}
+	}()
+	go func() {
+		resp, err := s.tryUpstream(ctx, msg, s.fallbackUpstream)
+		ch <- raceResult{fallback: true, resp: resp, err: err}
+	}()
+
+	var lastErr error
+	for i := 0; i < 2; i++ {
+		select {
+		case res := <-ch:
+			if res.err == nil {
+				// Healthy network path: reset the primary-failure tracking
+				// (the in-flight sibling stays unaccounted — it either won or
+				// was cancelled as infrastructure noise, not a real failure).
+				s.consecutiveFails.Store(0)
+				s.fallbackUntil.Store(0)
+				return res.resp, nil
+			}
+			if errors.Is(res.err, context.Canceled) {
+				// Cancellation caused by our own cancel(): the peer already
+				// won — the sibling's error carries no health information.
+				continue
+			}
+			lastErr = res.err
+			if !res.fallback {
+				if fails := s.consecutiveFails.Add(1); fails >= 3 {
+					// Trip circuit breaker: route to fallback for 30s
+					s.fallbackUntil.Store(time.Now().Add(30 * time.Second).Unix())
+				}
+			}
+		case <-time.After(upstreamTO + 500*time.Millisecond):
+			// Both exchanges outlive their own client timeout: treat as failure.
+			if lastErr == nil {
+				lastErr = errors.New("upstreams: both exchanges timed out")
+			}
+		}
+	}
+	if lastErr == nil {
+		lastErr = errors.New("upstream: empty response")
+	}
+	s.log.Warn("primary upstream failed, using fallback",
+		"upstream", s.upstream, "fallback", s.fallbackUpstream, "err", lastErr)
+	return nil, lastErr
+}
+
 // tryUpstream exchanges one query against addr (DoH endpoint or host:port
-// UDP with TCP retry on truncation/error).
-func (s *Server) tryUpstream(msg *dns.Msg, addr string) (*dns.Msg, error) {
+// UDP with TCP retry on truncation/error). ctx bounds the whole attempt.
+func (s *Server) tryUpstream(ctx context.Context, msg *dns.Msg, addr string) (*dns.Msg, error) {
 	if strings.HasPrefix(addr, "https://") || strings.HasPrefix(addr, "http://") {
-		return s.exchangeDoH(msg, addr)
+		return s.exchangeDoH(ctx, msg, addr)
 	}
 
 	// UDP with TCP fallback
-	resp, _, err := s.udpClient.Exchange(msg, addr)
+	resp, _, err := s.udpClient.ExchangeContext(ctx, msg, addr)
 	if err != nil || (resp != nil && resp.Truncated) {
-		resp, _, err = s.tcpClient.Exchange(msg, addr)
+		resp, _, err = s.tcpClient.ExchangeContext(ctx, msg, addr)
 	}
 	if err != nil {
 		return nil, err
@@ -762,12 +931,12 @@ func (s *Server) tryUpstream(msg *dns.Msg, addr string) (*dns.Msg, error) {
 	return resp, nil
 }
 
-func (s *Server) exchangeDoH(msg *dns.Msg, url string) (*dns.Msg, error) {
+func (s *Server) exchangeDoH(ctx context.Context, msg *dns.Msg, url string) (*dns.Msg, error) {
 	wire, err := msg.Pack()
 	if err != nil {
 		return nil, fmt.Errorf("pack doh query: %w", err)
 	}
-	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(wire))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(wire))
 	if err != nil {
 		return nil, fmt.Errorf("create doh req: %w", err)
 	}
