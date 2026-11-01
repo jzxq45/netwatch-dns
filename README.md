@@ -20,38 +20,42 @@
   The router hands out that host IP as the DNS server; every client device sends
   every hostname lookup to it, so it becomes a complete, passive record of
   network-wide DNS activity.
-- Every query is recorded: **client IP, domain, query type, timestamp** — into
-  local SQLite.
-- Returns **NXDOMAIN for known DoH/DoT endpoints** (`dns.google`,
-  `chrome.cloudflare-dns.com`, …) — *preventing DNS filtering bypass by
-  clients* that hardcode their own resolvers.
-- **AdBlock engine**: ships with a built-in [`blocklist.txt`](blocklist.txt),
-  supports background refresh by URL (`blocklist_urls`), whitelist always
-  wins, and you can send an offending domain to the blocklist in one click
-  straight from the live feed (🚫).
-- **Device intelligence**: Win32 `SendARP` resolves MAC addresses without
-  any drivers, an IEEE OUI vendor database names the maker (Apple, Samsung,
-  Xiaomi, …), and devices can be renamed by hand.
-- **Powerful DNS engine**: RFC 1035-compliant response cache, DNS-over-HTTPS
-  (DoH) upstream, thundering-herd protection (singleflight collapse of
-  identical in-flight queries), and automatic fallback to a LAN IP if port
-  53 is taken by the OS.
-- **Bailiwick verification**: responses from upstreams are checked against
-  the zone they were asked from (RFC 2181 / RFC 5452), protecting the cache
-  from poisoning; NXDOMAIN answers are cached with SOA-based negative TTLs
-  (RFC 2308 negative caching).
-- **Primary + Fallback upstream resolver**: queries go to the primary
-  resolver with automatic failover to a fallback and a circuit breaker
-  that skips a failing upstream until it recovers.
-- **Tuned SQLite storage**: WAL journaling mode with a memory page cache
-  for fast, low-contention writes.
-- Web UI (server-rendered, no build step): a live feed, a device list with a
-  per-device query log, per-device top domains for any time window, a 24h
-  activity graph, history export to CSV and JSON (`/api/export`), and a
-  small JSON API.
-- **Mobile companion**: hand out `netwatch.apk` straight from the web panel
-  (`/download/netwatch.apk`); the UI is fully responsive on phones.
+- **Inbound DNS-over-HTTPS (RFC 8484)**: `/dns-query` endpoint accepts binary and base64url
+  DNS queries over HTTPS. Allows mobile phones and browsers outside your LAN to use NetWatch securely.
+- **Zero-Day AI Threat Shield**: embedded Shannon entropy and homoglyph analyzer detects DGA
+  malware domains and brand-spoofing phishing attacks before they appear in public blocklists.
+- **SafeSearch Enforcement**: 1-click strict family filter for Google, YouTube, Bing, DuckDuckGo,
+  and Yandex without installing client-side software.
+- **Smart Home Privacy X-Ray**: identifies IoT gadgets (Smart TVs, speakers, cameras) via Win32 `SendARP`
+  and IEEE OUI, calculates a Privacy Grade (A+ to F), and detects telemetry/ACR leaks.
+- **Zero-Friction QR Pairing & Apple Profile**: scan the QR code to pair your phone; iPhones and Macs
+  install a native `com.apple.dnsSettings.managed` profile (`/netwatch.mobileconfig`) in seconds.
+- Every query is recorded: **client IP, domain, query type, timestamp** — into local SQLite (WAL mode).
+- Returns **NXDOMAIN for known DoH/DoT endpoints** (`dns.google`, `chrome.cloudflare-dns.com`, …) —
+  *preventing DNS filtering bypass by clients* that hardcode their own resolvers.
+- **AdBlock engine**: ships with a built-in [`blocklist.txt`](blocklist.txt), 1-click services blocking
+  (YouTube, TikTok, Telegram, Discord, Steam, Roblox, VK), and custom local rewrites (A/AAAA).
+- **High-Performance DNS Engine**: parallel upstream racing (lowest latency wins), optimistic cache
+  prefetch, RFC 1035/2181 Bailiwick poisoning defense, EDNS0 buffer clamping, and Singleflight deduplication.
+- **Web UI & Live Intelligence**: live SSE query stream with real-time substring search,
+  filter chips (Blocked / Allowed), per-device query log, 24h timeline chart, CSV/JSON export, and Prometheus metrics (`/metrics/prometheus`).
+- **Mobile companion**: hand out `netwatch.apk` straight from the web panel (`/download/netwatch.apk`).
 - Automatic retention: rows older than N days (default 7) are deleted daily.
+
+## Comparison: NetWatch DNS vs Pi-hole vs AdGuard Home
+
+| Feature | **NetWatch DNS** | **AdGuard Home** | **Pi-hole** |
+|:---|:---:|:---:|:---:|
+| **Architecture** | **Pure Go, zero CGO, single binary** | Go + Node build | C (FTL) + PHP + lighttpd |
+| **Zero-Day AI Threat Shield** | **✅ Built-in DGA & Phishing Heuristics** | ❌ Blocklists only | ❌ Blocklists only |
+| **Smart Home Privacy X-Ray** | **✅ IoT Leak Audit & Grade (A+..F)** | ❌ Raw query counts | ❌ Raw query counts |
+| **Instant Apple DNS Profile** | **✅ Native `.mobileconfig` + SVG QR** | ❌ Manual config | ❌ Manual config |
+| **Inbound DNS-over-HTTPS** | **✅ RFC 8484 (`/dns-query`)** | ✅ Supported | ⚠️ Extra proxy needed |
+| **Family SafeSearch** | **✅ 1-Click (Google, YT, Bing, Yandex, DDG)** | ✅ Supported | ⚠️ Manual regex rules |
+| **Parallel Upstream Racing** | **✅ Fastest upstream wins** | ⚠️ Optional | ⚠️ All or sequential |
+| **Optimistic Cache Prefetch** | **✅ Refreshes hot entries before expiry** | ✅ Supported | ❌ Only on cache miss |
+| **Live Stream Search & Filter** | **✅ Real-time substring & status filter** | ⚠️ Page refresh | ⚠️ Polling |
+| **Native Windows Tray GUI** | **✅ Built-in WebView2 + System Tray** | ❌ Web service only | ❌ Linux only |
 
 ## What it does NOT do
 
