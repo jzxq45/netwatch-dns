@@ -99,11 +99,11 @@ func clientIPFromRequest(r *http.Request) string {
 	return ip
 }
 
-// rateLimit guards h with the limiter (429 when exhausted). /healthz stays
-// unlimited so orchestrator probes never fail behind the limiter.
+// rateLimit guards h with the limiter (429 when exhausted). /healthz and /dns-query
+// stay unlimited so probes and DNS resolution never fail behind the HTTP limiter.
 func rateLimit(l *limiter, h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/healthz" {
+		if r.URL.Path != "/healthz" && r.URL.Path != "/dns-query" {
 			ip := clientIPFromRequest(r)
 			if !l.allow(ip, time.Now()) {
 				http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)

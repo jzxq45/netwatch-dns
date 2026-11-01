@@ -29,6 +29,8 @@ import (
 
 	"unicode/utf8"
 
+	"github.com/miekg/dns"
+
 	"monitor/internal/devices"
 	"monitor/internal/filter"
 	"monitor/internal/metrics"
@@ -115,6 +117,8 @@ func New(st Store, log *slog.Logger) *Server {
 	mux.HandleFunc("POST /api/device/rename", s.apiRenameDevice)
 	mux.HandleFunc("GET /download/netwatch.apk", s.downloadAPK)
 	mux.HandleFunc("GET /healthz", s.healthz)
+	mux.HandleFunc("GET /dns-query", s.handleDoH)
+	mux.HandleFunc("POST /dns-query", s.handleDoH)
 	// expvar counters/gauges (drops, in-flight, refused) — gated by token auth
 	// when web_token is set, like every non-exception route.
 	mux.Handle("GET /metrics", expvar.Handler())
@@ -150,6 +154,9 @@ type Server struct {
 
 	// OnSafeSearchToggle notifies when safe search is toggled via the web UI.
 	OnSafeSearchToggle func(enabled bool)
+
+	// DNSExchange routes in-memory DNS queries (e.g. from DoH RFC 8484) through the DNS server.
+	DNSExchange func(r *dns.Msg, clientAddr net.Addr) *dns.Msg
 }
 
 func (s *Server) Broadcast(e store.Event) {
@@ -208,7 +215,7 @@ func (s *Server) route() http.Handler {
 // tokenAuth guards h with the configured web token.
 func (s *Server) tokenAuth(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/healthz" || strings.HasPrefix(r.URL.Path, "/static/") {
+		if r.URL.Path == "/healthz" || r.URL.Path == "/dns-query" || strings.HasPrefix(r.URL.Path, "/static/") {
 			h.ServeHTTP(w, r)
 			return
 		}
@@ -406,6 +413,15 @@ const contentFeed = `
   {{if gt .Data.Hidden 0}}<span class="chip" title="noise=1 строки за окно ленты">🚫 {{.Data.Hidden}} шумных скрыто</span>{{end}}{{end}}
   <span style="margin-left:.6rem;opacity:.6">|</span> <a class="chip link" href="/api/export?format=csv" download>📥 Экспорт CSV</a> <a class="chip link" href="/api/export?format=json" download>JSON</a>
 </p>
+<div class="feed-filter-bar" style="display:flex;gap:.5rem;margin:.6rem 0;flex-wrap:wrap;align-items:center">
+  <input type="text" class="chip" id="feedSearch" placeholder="🔍 Поиск по домену или IP..." style="min-width:14rem;padding:.3rem .6rem">
+  <div style="display:inline-flex;gap:.3rem" id="feedFilterChips">
+    <button class="chip filter-btn active" data-filter="all" style="cursor:pointer;font-weight:600;border-color:var(--accent)">Все</button>
+    <button class="chip filter-btn" data-filter="blocked" style="cursor:pointer">🚫 Блок / Шум</button>
+    <button class="chip filter-btn" data-filter="allowed" style="cursor:pointer">✓ Обычные</button>
+  </div>
+  <span id="feedFilterCount" class="mute" style="font-size:.8rem;display:none"></span>
+</div>
 {{if .Data.Events}}
 <table>
   <thead><tr><th>Время</th><th></th><th>Устройство</th><th>Домен</th></tr></thead>

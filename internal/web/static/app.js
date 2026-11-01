@@ -488,6 +488,75 @@
     });
   }
 
+  // Live Feed search and filtering
+  var feedSearch = document.getElementById('feedSearch');
+  var filterBtns = document.querySelectorAll('.filter-btn');
+  var filterCount = document.getElementById('feedFilterCount');
+  var currentFilter = 'all';
+
+  function matchesFilter(tr) {
+    if (!tr) return false;
+    var query = feedSearch ? feedSearch.value.trim().toLowerCase() : '';
+    if (query) {
+      var dom = tr.querySelector('.dom');
+      var ip = tr.querySelector('a');
+      var text = (dom ? dom.textContent : '') + ' ' + (ip ? ip.textContent : '');
+      if (text.toLowerCase().indexOf(query) === -1) {
+        return false;
+      }
+    }
+    if (currentFilter === 'blocked') {
+      var isBlocked = tr.querySelector('.badge.blocked') !== null;
+      if (!isBlocked) return false;
+    } else if (currentFilter === 'allowed') {
+      var isBlocked = tr.querySelector('.badge.blocked') !== null;
+      if (isBlocked) return false;
+    }
+    return true;
+  }
+
+  function refilterFeed() {
+    if (!feedTbody) return;
+    var rows = feedTbody.querySelectorAll('tr');
+    var visible = 0;
+    rows.forEach(function (tr) {
+      if (matchesFilter(tr)) {
+        tr.style.display = '';
+        visible++;
+      } else {
+        tr.style.display = 'none';
+      }
+    });
+    if (filterCount) {
+      var query = feedSearch ? feedSearch.value.trim() : '';
+      if (query || currentFilter !== 'all') {
+        filterCount.style.display = 'inline';
+        filterCount.textContent = 'найдено: ' + visible + ' из ' + rows.length;
+      } else {
+        filterCount.style.display = 'none';
+      }
+    }
+  }
+
+  if (feedSearch) {
+    feedSearch.addEventListener('input', refilterFeed);
+  }
+
+  filterBtns.forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      filterBtns.forEach(function (b) {
+        b.classList.remove('active');
+        b.style.fontWeight = 'normal';
+        b.style.borderColor = 'var(--line)';
+      });
+      btn.classList.add('active');
+      btn.style.fontWeight = '600';
+      btn.style.borderColor = 'var(--accent)';
+      currentFilter = btn.getAttribute('data-filter') || 'all';
+      refilterFeed();
+    });
+  });
+
   // Live SSE stream for real-time feed
   if (feedTbody && window.location.pathname === '/') {
     var source = new EventSource('/api/events/stream');
@@ -514,9 +583,13 @@
           '<td class="dom">' + safeName + noiseBadge +
           '<button class="chip btn-block-dom" data-dom="' + safeName + '" title="Заблокировать этот домен" style="cursor:pointer;padding:0 .35rem;margin-left:.35rem;font-size:.7rem">🚫</button></td>';
 
+        tr.style.display = matchesFilter(tr) ? '' : 'none';
         feedTbody.insertBefore(tr, feedTbody.firstChild);
         while (feedTbody.children.length > 100) {
           feedTbody.removeChild(feedTbody.lastChild);
+        }
+        if (filterCount && (feedSearch && feedSearch.value.trim() || currentFilter !== 'all')) {
+          refilterFeed();
         }
       } catch (err) {}
     };

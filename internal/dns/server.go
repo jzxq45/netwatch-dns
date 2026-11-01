@@ -290,6 +290,31 @@ func (s *Server) SetSafeSearch(enabled bool) {
 	s.safeSearch.Store(enabled)
 }
 
+type dohResponseWriter struct {
+	remoteAddr net.Addr
+	msg        *dns.Msg
+}
+
+func (w *dohResponseWriter) LocalAddr() net.Addr         { return &net.TCPAddr{IP: net.IPv4zero, Port: 443} }
+func (w *dohResponseWriter) RemoteAddr() net.Addr        { return w.remoteAddr }
+func (w *dohResponseWriter) WriteMsg(m *dns.Msg) error   { w.msg = m; return nil }
+func (w *dohResponseWriter) Write(b []byte) (int, error) { return len(b), nil }
+func (w *dohResponseWriter) Close() error                { return nil }
+func (w *dohResponseWriter) TsigStatus() error           { return nil }
+func (w *dohResponseWriter) TsigTimersOnly(bool)         {}
+func (w *dohResponseWriter) Hijack()                     {}
+
+// ExchangeDoH executes the full DNS filtering, caching and resolution pipeline
+// for an in-memory DNS query received over HTTP (RFC 8484).
+func (s *Server) ExchangeDoH(r *dns.Msg, clientAddr net.Addr) *dns.Msg {
+	if r == nil {
+		return nil
+	}
+	rw := &dohResponseWriter{remoteAddr: clientAddr}
+	s.handle(rw, r)
+	return rw.msg
+}
+
 // rewriteTTL is the TTL for locally synthesized rewrite answers.
 const rewriteTTL = 300
 
@@ -664,7 +689,8 @@ func (s *Server) handle(w dns.ResponseWriter, r *dns.Msg) {
 	}()
 
 	srcIP := clientIP(w.RemoteAddr())
-	if !trustedClient(srcIP) {
+	_, isDoH := w.(*dohResponseWriter)
+	if !isDoH && !trustedClient(srcIP) {
 		metrics.DNSRefusedTotal.Add(1)
 		refused(w, r)
 		return

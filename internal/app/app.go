@@ -56,6 +56,7 @@ func Run(ctx context.Context, cfg config.Config) error {
 	w.RulesCount = dnsSrv.BlockedRulesCount
 	w.SafeSearch = dnsSrv.SafeSearch
 	w.OnSafeSearchToggle = dnsSrv.SetSafeSearch
+	w.DNSExchange = dnsSrv.ExchangeDoH
 
 	rules, err := db.ListCustomRules(ctx)
 	if err != nil {
