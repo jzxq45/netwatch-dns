@@ -377,6 +377,7 @@ const contentFeed = `
       <button class="chip link" id="btnPhonePair" style="cursor:pointer">📱 Телефон</button>
       <button class="chip link" id="btnSafeSearch" style="cursor:pointer" title="Принудительный безопасный поиск для Google, YouTube, Bing, Yandex, DuckDuckGo">🛡️ SafeSearch: <span id="valSafeSearch">...</span></button>
       <button class="chip link" id="btnAdultBlock" style="cursor:pointer" title="Блокировка сайтов и платформ для взрослых (18+ / NSFW)">🔞 18+: <span id="valAdultBlock">...</span></button>
+      <button class="chip link" id="btnSchedules" style="cursor:pointer" title="Расписание блокировок сервисов по времени и дням недели (родительский контроль)">⏰ Расписание</button>
       <div class="chip" id="lblBlockStats" title="Активная защита от рекламы и вредоносных доменов">🛡️ Защита: <span id="valBlockedQueries">0</span> угроз (<span id="valBlockedRules">0</span> правил)</div>
       <div class="chip" id="lblCacheStats" title="Доля доменов, отвеченных из локального кэша за всё время">💾 Кэш: <span id="valCacheRatio">0</span>%</div>
       <div class="chip" id="lblStatStats" title="Доля заблокированных запросов за 24 часа (по /api/stats)">🚫 Блок: <span id="valBlockPct">0</span>%</div>
@@ -422,6 +423,40 @@ const contentFeed = `
         </div>
       </div>
     </div>
+  </div>
+  <div id="schedulesCard" style="display:none;margin-top:.8rem;padding:.8rem .95rem;border:1px dashed var(--line);border-radius:var(--radius);font-size:.85rem">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.6rem">
+      <b>⏰ Расписание блокировок (Родительский контроль / Ограничение времени)</b>
+      <button class="chip link" id="btnCloseSchedules" style="cursor:pointer">✕ Закрыть</button>
+    </div>
+    <div class="mute" style="margin-bottom:.6rem;font-size:.78rem">Автоматическая блокировка сервисов или доменов в заданное время (например, отключение YouTube с 22:00 до 07:00 в будни для детского планшета).</div>
+    <div style="display:flex;gap:.5rem;flex-wrap:wrap;align-items:center;margin-bottom:.8rem">
+      <input type="text" class="chip" id="schedTarget" placeholder="Сервис (youtube, tiktok, telegram...) или домен" style="flex:1 1 12rem">
+      <input type="text" class="chip" id="schedClientIp" placeholder="IP устройства (пусто = для всех)" style="width:11rem">
+      <span class="mute" style="font-size:.8rem">С:</span>
+      <input type="time" class="chip" id="schedStart" value="22:00">
+      <span class="mute" style="font-size:.8rem">До:</span>
+      <input type="time" class="chip" id="schedEnd" value="07:00">
+      <select class="chip" id="schedDays" style="cursor:pointer">
+        <option value="0">Каждый день</option>
+        <option value="62">Будни (Пн-Пт)</option>
+        <option value="65">Выходные (Сб-Вс)</option>
+      </select>
+      <button class="chip link" id="btnAddSchedule" style="cursor:pointer">➕ Добавить</button>
+      <span id="schedError" style="color:#ff8080;font-size:.82rem;display:none"></span>
+    </div>
+    <table id="schedTable" style="width:100%;margin-top:.4rem;font-size:.82rem">
+      <thead>
+        <tr style="text-align:left;border-bottom:1px solid var(--line);opacity:.7">
+          <th style="padding:4px 6px">Цель</th>
+          <th style="padding:4px 6px">Устройство</th>
+          <th style="padding:4px 6px">Интервал</th>
+          <th style="padding:4px 6px">Дни</th>
+          <th style="padding:4px 6px">Действие</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
   </div>
 </div>
 <h2>Лента <span class="sub">последние {{len .Data.Events}}</span></h2>

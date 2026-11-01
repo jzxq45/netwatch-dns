@@ -357,6 +357,165 @@
       });
     }
 
+    // Schedules UI (Bedtime / Time-based blocking)
+    var btnSchedules = document.getElementById('btnSchedules');
+    var schedulesCard = document.getElementById('schedulesCard');
+    var btnCloseSchedules = document.getElementById('btnCloseSchedules');
+    var schedTarget = document.getElementById('schedTarget');
+    var schedClientIp = document.getElementById('schedClientIp');
+    var schedStart = document.getElementById('schedStart');
+    var schedEnd = document.getElementById('schedEnd');
+    var schedDays = document.getElementById('schedDays');
+    var btnAddSchedule = document.getElementById('btnAddSchedule');
+    var schedError = document.getElementById('schedError');
+    var schedTbody = schedulesCard ? schedulesCard.querySelector('#schedTable tbody') : null;
+
+    if (btnSchedules && schedulesCard && schedTbody) {
+      function showSchedError(msg) {
+        if (!schedError) return;
+        schedError.textContent = msg || '';
+        schedError.style.display = msg ? 'inline' : 'none';
+      }
+
+      function formatTime(h, m) {
+        var hs = h < 10 ? '0' + h : '' + h;
+        var ms = m < 10 ? '0' + m : '' + m;
+        return hs + ':' + ms;
+      }
+
+      function formatDays(mask) {
+        if (!mask || mask === 127) return 'Каждый день';
+        if (mask === 62) return 'Будни (Пн-Пт)';
+        if (mask === 65) return 'Выходные (Сб-Вс)';
+        var dayNames = ['Вс', 'Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб'];
+        var active = [];
+        for (var i = 0; i < 7; i++) {
+          if (mask & (1 << i)) active.push(dayNames[i]);
+        }
+        return active.join(', ');
+      }
+
+      function renderSchedules(list) {
+        schedTbody.innerHTML = '';
+        if (!Array.isArray(list) || !list.length) {
+          var empty = document.createElement('tr');
+          empty.innerHTML = '<td colspan="5" class="mute" style="padding:.4rem 0">Нет активных расписаний блокировки. Добавьте первое правило выше.</td>';
+          schedTbody.appendChild(empty);
+          return;
+        }
+        list.forEach(function (sc) {
+          var tr = document.createElement('tr');
+          var targetStr = escapeHTML(sc.target || '');
+          var clientStr = sc.client_ip ? escapeHTML(sc.client_ip) : '<span class="mute">Все устройства</span>';
+          var timeStr = formatTime(sc.start_hour, sc.start_min) + ' – ' + formatTime(sc.end_hour, sc.end_min);
+          var daysStr = escapeHTML(formatDays(sc.days_mask));
+          tr.innerHTML = '<td style="padding:.25rem .5rem"><span class="chip">' + targetStr + '</span></td>' +
+            '<td style="padding:.25rem .5rem">' + clientStr + '</td>' +
+            '<td style="padding:.25rem .5rem"><span class="chip" style="font-family:var(--mono)">' + timeStr + '</span></td>' +
+            '<td style="padding:.25rem .5rem">' + daysStr + '</td>' +
+            '<td style="padding:.25rem .5rem"><button class="chip link btn-sched-del" data-id="' + sc.id + '" title="Удалить расписание" style="cursor:pointer">🗑️</button></td>';
+          schedTbody.appendChild(tr);
+        });
+      }
+
+      function loadSchedules() {
+        fetch('/api/schedules')
+          .then(function (r) {
+            if (!r.ok) throw new Error('Ошибка загрузки расписаний');
+            return r.json();
+          })
+          .then(renderSchedules)
+          .catch(function (err) {
+            showSchedError(err.message);
+          });
+      }
+
+      btnSchedules.addEventListener('click', function () {
+        var show = schedulesCard.style.display === 'none' || !schedulesCard.style.display;
+        if (show) {
+          showSchedError('');
+          loadSchedules();
+        }
+        schedulesCard.style.display = show ? 'block' : 'none';
+      });
+
+      if (btnCloseSchedules) {
+        btnCloseSchedules.addEventListener('click', function () {
+          schedulesCard.style.display = 'none';
+        });
+      }
+
+      document.addEventListener('keydown', function (ev) {
+        if (ev.key === 'Escape' && schedulesCard.style.display !== 'none') {
+          schedulesCard.style.display = 'none';
+        }
+      });
+
+      if (btnAddSchedule) {
+        btnAddSchedule.addEventListener('click', function () {
+          showSchedError('');
+          var tgt = (schedTarget.value || '').trim();
+          if (!tgt) {
+            showSchedError('Укажите сервис или домен');
+            return;
+          }
+          var startTime = (schedStart.value || '22:00').split(':');
+          var endTime = (schedEnd.value || '07:00').split(':');
+          var startH = parseInt(startTime[0], 10) || 0;
+          var startM = parseInt(startTime[1], 10) || 0;
+          var endH = parseInt(endTime[0], 10) || 0;
+          var endM = parseInt(endTime[1], 10) || 0;
+          var days = parseInt(schedDays.value, 10) || 0;
+          var ip = (schedClientIp.value || '').trim();
+
+          btnAddSchedule.disabled = true;
+          fetch('/api/schedules', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              target: tgt,
+              client_ip: ip,
+              start_hour: startH,
+              start_min: startM,
+              end_hour: endH,
+              end_min: endM,
+              days_mask: days
+            })
+          })
+          .then(function (r) {
+            if (!r.ok) {
+              return r.text().then(function (t) { throw new Error(t || 'Ошибка добавления'); });
+            }
+            schedTarget.value = '';
+            schedClientIp.value = '';
+            loadSchedules();
+          })
+          .catch(function (e) {
+            showSchedError(e.message || 'Ошибка сохранения');
+          })
+          .finally(function () {
+            btnAddSchedule.disabled = false;
+          });
+        });
+      }
+
+      schedTbody.addEventListener('click', function (ev) {
+        var btn = ev.target.closest('.btn-sched-del');
+        if (!btn) return;
+        var id = btn.getAttribute('data-id');
+        if (!id) return;
+        btn.disabled = true;
+        fetch('/api/schedules?id=' + encodeURIComponent(id), { method: 'DELETE' })
+          .then(function (r) {
+            if (!r.ok) throw new Error('Не удалось удалить');
+            loadSchedules();
+          })
+          .catch(function () {
+            btn.disabled = false;
+          });
+      });
+    }
+
     if (btnPhonePair && phonePairCard) {
       btnPhonePair.addEventListener('click', function () {
         var show = phonePairCard.style.display === 'none' || !phonePairCard.style.display;
