@@ -102,7 +102,7 @@
 ## Requirements
 
 - A host that is always on: Windows / Linux / Raspberry Pi.
-- Go 1.23+ to build — **or grab the ready-made Windows binaries** (see below).
+- Go 1.26+ to build — **or grab the ready-made Windows binaries** (see below).
 - Admin rights only for port 53 on Windows (see [Troubleshooting]).
 - Your router must allow setting the LAN DNS server (almost all do; see
   [docs/ROUTER-SETUP.md](docs/ROUTER-SETUP.md)).
@@ -126,7 +126,10 @@ from GitHub Releases. It contains:
     otherwise the UI automatically opens in your default browser).
 - **`monitor.exe`** — classic console server (for scheduled tasks, services,
   remote hosts): same engine, logs to stdout.
-- `monitor.yaml.example` — annotated config template.
+- `blocklist.txt` — starter blocklist (trackers/ads) loaded at first run.
+- `run.bat` — double-click launcher for `netwatch.exe`.
+- `netwatch.apk` — prebuilt Android app, if the zip was cut with it.
+- `VERSION.txt` — build timestamp and git version.
 
 Both binaries are built with `CGO_ENABLED=0` and embed everything (UI, static
 assets); only the WebView2 runtime on the user's machine is external. To cut
@@ -217,6 +220,11 @@ Expect an answer and a `dns query` line in the console.
 ### 8. Reconnect a client device
 
 Toggle Wi-Fi off/on (or reboot the phone) so it picks the new DNS via DHCP.
+
+No-router alternative for iPhones/iPads/Macs: install the managed DNS
+profile `http://<monitor-ip>:8080/netwatch.mobileconfig` once and the device
+uses netwatch-resolver without touching DHCP (details:
+[docs/ROUTER-SETUP.md](docs/ROUTER-SETUP.md), "Per-device DNS").
 
 ### 9. Open the web UI
 

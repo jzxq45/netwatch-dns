@@ -52,6 +52,24 @@ config rule
 - Keenetic knows «Интернет-фильтры»; local policy enforcement is done by the
   monitor itself (NXDOMAIN for DoH endpoints), no router filter needed.
 
+## Per-device DNS, no router changes (iOS / iPadOS / macOS)
+
+When the router cannot hand out DNS, or you only want *some* devices on the
+monitor host, install the managed DNS profile directly on the device:
+
+1. Open `http://<monitor-host-ip>:8080/netwatch.mobileconfig` in Safari
+   (the panel QR code — UI top bar — also points to the panel; the profile
+   link is on the mobile page). Allow the profile download, then confirm
+   install in Settings → Profile Downloaded.
+2. The device now sends DNS queries straight to the monitor host: the
+   `com.apple.dnsSettings.managed` payload pins its resolver.
+3. Remove the profile in Settings → General → VPN & Device Management to
+   stop being monitored.
+
+Android devices: set a static DNS on the Wi-Fi network instead (see
+fallback list below); the Android app from docs/ANDROID.md points at the
+panel, not at the resolver.
+
 ## If the router cannot hand out custom DNS
 
 1. Move the listener: `dns_listen: 0.0.0.0:5300` on the monitor host and add
