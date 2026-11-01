@@ -689,6 +689,7 @@ func serve(ctx context.Context, srv *dns.Server) error {
 }
 
 func (s *Server) handle(w dns.ResponseWriter, r *dns.Msg) {
+	metrics.DNSQueriesTotal.Add(1)
 	// Admission control before anything else: bound handler goroutines and
 	// refuse non-LAN sources. A flood must fail (fast) — not wedge the host.
 	n := s.inflight.Add(1)

@@ -10,7 +10,6 @@ import (
 	"encoding/csv"
 	"encoding/json"
 	"errors"
-	"expvar"
 	"fmt"
 	"html/template"
 	"io"
@@ -85,11 +84,12 @@ func New(st Store, log *slog.Logger) *Server {
 	}
 	mux := http.NewServeMux()
 	s := &Server{
-		st:     st,
-		log:    log,
-		mux:    mux,
-		lim:    newLimiter(rateLimitRPS, rateLimitBurst),
-		broker: newEventBroker(),
+		st:      st,
+		log:     log,
+		mux:     mux,
+		lim:     newLimiter(rateLimitRPS, rateLimitBurst),
+		broker:  newEventBroker(),
+		started: time.Now(),
 	}
 	mux.HandleFunc("GET /{$}", s.feed)
 	mux.HandleFunc("GET /devices", s.devices)
@@ -128,21 +128,20 @@ func New(st Store, log *slog.Logger) *Server {
 	mux.HandleFunc("GET /healthz", s.healthz)
 	mux.HandleFunc("GET /dns-query", s.handleDoH)
 	mux.HandleFunc("POST /dns-query", s.handleDoH)
-	// expvar counters/gauges (drops, in-flight, refused) — gated by token auth
-	// when web_token is set, like every non-exception route.
-	mux.Handle("GET /metrics", expvar.Handler())
-	// Prometheus text exposition for the same counters (scrape-friendly =
-	// no JSON parsing on the collector side).
+	// expvar counters/gauges remain available as JSON at /metrics/prometheus
+	// when web_token is set; /metrics is the public Prometheus scrape target.
+	mux.HandleFunc("GET /metrics", s.prometheusMetrics)
 	mux.HandleFunc("GET /metrics/prometheus", s.prometheusMetrics)
 	return s
 }
 
 type Server struct {
-	st     Store
-	log    *slog.Logger
-	mux    *http.ServeMux
-	lim    *limiter
-	broker *eventBroker
+	st      Store
+	log     *slog.Logger
+	mux     *http.ServeMux
+	lim     *limiter
+	broker  *eventBroker
+	started time.Time
 
 	// Token enables optional web_token auth when set (internal/web tests too).
 	// Accepts X-Auth-Token header, ?token= query or auth_token cookie; /healthz
@@ -233,7 +232,7 @@ func (s *Server) route() http.Handler {
 // tokenAuth guards h with the configured web token.
 func (s *Server) tokenAuth(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/healthz" || r.URL.Path == "/dns-query" || strings.HasPrefix(r.URL.Path, "/static/") {
+		if r.URL.Path == "/healthz" || r.URL.Path == "/metrics" || r.URL.Path == "/dns-query" || strings.HasPrefix(r.URL.Path, "/static/") {
 			h.ServeHTTP(w, r)
 			return
 		}
@@ -1018,32 +1017,48 @@ func (s *Server) apiStats(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(out) //nolint:errcheck // client may vanish mid-write
 }
 
-// prometheusMetric is one exposition row of /metrics/prometheus.
+// prometheusMetric is one exposition row of a Prometheus text response.
 type prometheusMetric struct {
 	name  string
 	help  string
 	typ   string // "counter" | "gauge"
-	value int64
+	value float64
 }
 
 // prometheusMetrics renders expvar counters in the Prometheus text format
 // (# HELP / # TYPE per metric) so standard collectors need no custom query.
-func (s *Server) prometheusMetrics(w http.ResponseWriter, _ *http.Request) {
+// /metrics is the public scrape target; /metrics/prometheus keeps the legacy
+// expvar-shaped metric names for existing dashboards.
+func (s *Server) prometheusMetrics(w http.ResponseWriter, r *http.Request) {
 	list := []prometheusMetric{
-		{"dns_cache_hits_total", "DNS queries answered from local cache.", "counter", metrics.DNSCacheHitsTotal.Value()},
-		{"dns_cache_misses_total", "DNS queries forwarded to an upstream resolver.", "counter", metrics.DNSCacheMissesTotal.Value()},
-		{"dns_blocked_total", "DNS queries answered with NXDOMAIN by a blocklist match.", "counter", metrics.DNSBlockedTotal.Value()},
-		{"dns_ai_blocked_total", "Zero-day DNS threats (DGA/phishing) answered NXDOMAIN by the local AI engine.", "counter", metrics.DNSAIBlockedTotal.Value()},
-		{"dns_refused_total", "DNS queries refused (admission control / open-resolver ACL).", "counter", metrics.DNSRefusedTotal.Value()},
-		{"dns_inflight", "DNS queries currently pending an upstream answer.", "gauge", metrics.DNSInflight.Value()},
-		{"dns_log_rows_rejected_total", "Serve-path DNS rows dropped because the writer queue was full.", "counter", metrics.LogRowsRejectedTotal.Value()},
-		{"dns_blocklog_capped_total", "Block-log window entries dropped by the per-window key cap.", "counter", metrics.BlockAggrCapTotal.Value()},
-		{"devices_sightings_dropped_total", "Device sightings dropped because the resolver queue was full.", "counter", metrics.DevicesDroppedTotal.Value()},
-		{"sink_rows_dropped_total", "Accepted log rows irreversibly lost to repeated DB failures.", "counter", metrics.SinkRowsDroppedTotal.Value()},
+		{"dns_cache_hits_total", "DNS queries answered from local cache.", "counter", float64(metrics.DNSCacheHitsTotal.Value())},
+		{"dns_cache_misses_total", "DNS queries forwarded to an upstream resolver.", "counter", float64(metrics.DNSCacheMissesTotal.Value())},
+		{"dns_blocked_total", "DNS queries answered with NXDOMAIN by a blocklist match.", "counter", float64(metrics.DNSBlockedTotal.Value())},
+		{"dns_ai_blocked_total", "Zero-day DNS threats (DGA/phishing) answered NXDOMAIN by the local AI engine.", "counter", float64(metrics.DNSAIBlockedTotal.Value())},
+		{"dns_refused_total", "DNS queries refused (admission control / open-resolver ACL).", "counter", float64(metrics.DNSRefusedTotal.Value())},
+		{"dns_inflight", "DNS queries currently pending an upstream answer.", "gauge", float64(metrics.DNSInflight.Value())},
+		{"dns_log_rows_rejected_total", "Serve-path DNS rows dropped because the writer queue was full.", "counter", float64(metrics.LogRowsRejectedTotal.Value())},
+		{"dns_blocklog_capped_total", "Block-log window entries dropped by the per-window key cap.", "counter", float64(metrics.BlockAggrCapTotal.Value())},
+		{"devices_sightings_dropped_total", "Device sightings dropped because the resolver queue was full.", "counter", float64(metrics.DevicesDroppedTotal.Value())},
+		{"sink_rows_dropped_total", "Accepted log rows irreversibly lost to repeated DB failures.", "counter", float64(metrics.SinkRowsDroppedTotal.Value())},
+	}
+	if r.URL.Path == "/metrics" {
+		rules := 0
+		if s.RulesCount != nil {
+			rules = s.RulesCount()
+		}
+		list = []prometheusMetric{
+			{"netwatch_dns_queries_total", "Total DNS queries processed", "counter", float64(metrics.DNSQueriesTotal.Value())},
+			{"netwatch_dns_queries_blocked_total", "Total DNS queries blocked", "counter", float64(metrics.DNSBlockedTotal.Value() + metrics.DNSAIBlockedTotal.Value())},
+			{"netwatch_dns_cache_hits_total", "Total DNS cache hits", "counter", float64(metrics.DNSCacheHitsTotal.Value())},
+			{"netwatch_dns_rules_count", "Total active blocklist rules", "gauge", float64(rules)},
+			{"netwatch_uptime_seconds", "Server uptime in seconds", "gauge", time.Since(s.started).Seconds()},
+		}
 	}
 	var buf bytes.Buffer
 	for _, m := range list {
-		fmt.Fprintf(&buf, "# HELP %s %s\n# TYPE %s %s\n%s %d\n", m.name, m.help, m.name, m.typ, m.name, m.value)
+		fmt.Fprintf(&buf, "# HELP %s %s\n# TYPE %s %s\n%s %s\n",
+			m.name, m.help, m.name, m.typ, m.name, strconv.FormatFloat(m.value, 'f', -1, 64))
 	}
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	_, _ = w.Write(buf.Bytes())

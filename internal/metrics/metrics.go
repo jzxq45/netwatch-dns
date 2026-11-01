@@ -12,6 +12,10 @@ var DNSInflight = expvar.NewInt("dns_inflight")
 
 // Counters.
 var (
+	// DNSQueriesTotal: every DNS query entering the handler, including those
+	// later refused, blocked or answered from cache.
+	DNSQueriesTotal = expvar.NewInt("dns_queries_total")
+
 	// DNSRefusedTotal: REFUSED answers from admission-control denial
 	// (over max in-flight) and the open-resolver ACL.
 	DNSRefusedTotal = expvar.NewInt("dns_refused_total")

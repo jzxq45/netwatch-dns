@@ -298,7 +298,7 @@ More: [docs/ANDROID.md](docs/ANDROID.md) (mobile app specifics).
 - [x] Android WebView app, optional web_token
 - [x] Hardening: full server timeouts, panic recovery, per-IP rate limiting,
       read/write DB pool split, chunked retention, DNS admission control +
-      LAN-only ACL, expvar counters exposed at `/metrics`
+      LAN-only ACL, Prometheus metrics exposed at `/metrics`
 - [x] Windows desktop app (`netwatch.exe`, WebView2 window, graceful close),
       system tray, one-click DNS switch, registry auto-start, firewall tuning
 - [x] Zero-friction desktop: LAN IP/gateway autodetection, port-53 fallback
