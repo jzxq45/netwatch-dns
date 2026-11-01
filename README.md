@@ -26,6 +26,9 @@
   malware domains and brand-spoofing phishing attacks before they appear in public blocklists.
 - **SafeSearch Enforcement**: 1-click strict family filter for Google, YouTube, Bing, DuckDuckGo,
   and Yandex without installing client-side software.
+- **1-Click 18+ Adult Protection**: Instant toggle in Web UI and config (`MONITOR_BLOCK_ADULT=1`) to shield children and home networks from adult/NSFW platforms.
+- **Bedtime & Service Schedules**: Schedule-based blocking of distracting services (YouTube, TikTok, Telegram, Roblox, etc.) or specific domains per device (e.g., 22:00 to 07:00 on school nights).
+- **Homelab & Grafana Prometheus Metrics**: Public `/metrics` endpoint exposing query totals, block counts, cache hit ratios, active rules, and server uptime in standard Prometheus format.
 - **Smart Home Privacy X-Ray**: identifies IoT gadgets (Smart TVs, speakers, cameras) via Win32 `SendARP`
   and IEEE OUI, calculates a Privacy Grade (A+ to F), and detects telemetry/ACR leaks.
 - **Zero-Friction QR Pairing & Apple Profile**: scan the QR code to pair your phone; iPhones and Macs
@@ -52,6 +55,9 @@
 | **Instant Apple DNS Profile** | **✅ Native `.mobileconfig` + SVG QR** | ❌ Manual config | ❌ Manual config |
 | **Inbound DNS-over-HTTPS** | **✅ RFC 8484 (`/dns-query`)** | ✅ Supported | ⚠️ Extra proxy needed |
 | **Family SafeSearch** | **✅ 1-Click (Google, YT, Bing, Yandex, DDG)** | ✅ Supported | ⚠️ Manual regex rules |
+| **18+ / Adult Content Filter** | **✅ 1-Click Instant Shield** | ✅ Supported | ⚠️ Third-party blocklist |
+| **Bedtime & Service Schedules** | **✅ Per-device / per-service time rules** | ✅ Supported | ❌ Manual cron scripts |
+| **Prometheus Metrics** | **✅ Native OpenMetrics (/metrics)** | ⚠️ Unofficial exporter | ⚠️ Third-party exporter |
 | **Parallel Upstream Racing** | **✅ Fastest upstream wins** | ⚠️ Optional | ⚠️ All or sequential |
 | **Optimistic Cache Prefetch** | **✅ Refreshes hot entries before expiry** | ✅ Supported | ❌ Only on cache miss |
 | **Live Stream Search & Filter** | **✅ Real-time substring & status filter** | ⚠️ Page refresh | ⚠️ Polling |
