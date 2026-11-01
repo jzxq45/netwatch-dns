@@ -126,6 +126,10 @@ type Server struct {
 	// zero-day threats never reach upstream. Stateless: safe to share.
 	aiEngine *filter.AIEngine
 
+	// schedules holds bedtime / time-limit rules, replaced wholesale by the
+	// web layer on CRUD. Concurrent-safe; never nil after New.
+	schedules *ScheduleEngine
+
 	// prefetching tracks async cache-refreshes in flight per cache key so a
 	// hot entry is refreshed once, not once per query (cache stampede guard).
 	prefetchMu  sync.Mutex
@@ -218,6 +222,7 @@ func New(cfg Config, db *sql.DB, log *slog.Logger) *Server {
 		prefetching:      make(map[string]struct{}),
 		rewrites:         make(map[string]string),
 		aiEngine:         filter.NewAIEngine(),
+		schedules:        NewScheduleEngine(),
 	}
 	s.safeSearch.Store(cfg.SafeSearch)
 	return s
@@ -725,7 +730,12 @@ func (s *Server) handle(w dns.ResponseWriter, r *dns.Msg) {
 	if rewritten == nil && s.safeSearch.Load() {
 		rewritten = filter.SafeSearchRewrite(r)
 	}
-	blocked := rewritten == nil && s.isBlocked(q.Name)
+	blocklisted := rewritten == nil && s.isBlocked(q.Name)
+	// Bedtime / time-limit rules are evaluated before AI heuristics and are
+	// treated like blocklist hits (NXDOMAIN, noise=1) — but logged separately
+	// so schedule-driven blocks stay distinguishable from DoH ones.
+	scheduled := rewritten == nil && !blocklisted && s.IsScheduledBlocked(srcIP, q.Name, time.Now())
+	blocked := blocklisted || scheduled
 	noisy := s.isNoise(domain)
 	// Heuristic AI shield: names that are neither locally rewritten nor
 	// matched by the blocklist are scored for zero-day patterns (DGA,
@@ -771,9 +781,13 @@ func (s *Server) handle(w dns.ResponseWriter, r *dns.Msg) {
 	}
 	if blocked {
 		metrics.DNSBlockedTotal.Add(1)
-		// DoH endpoints are answered NXDOMAIN here; the request itself is
-		// aggregated: one dns_blocked_doh line per (client, domain) per window.
-		s.aggr.add(srcIP, domain)
+		if scheduled {
+			s.log.Info("dns scheduled block", "client", srcIP, "domain", domain)
+		} else {
+			// DoH endpoints are answered NXDOMAIN here; the request itself is
+			// aggregated: one dns_blocked_doh line per (client, domain) per window.
+			s.aggr.add(srcIP, domain)
+		}
 		nxdomain(w, r)
 		return
 	}

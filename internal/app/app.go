@@ -94,6 +94,25 @@ func Run(ctx context.Context, cfg config.Config) error {
 		dnsSrv.ApplyRewrite(domain, ip)
 	}
 
+	// Bedtime / time-limit rules: load at startup, reload after web CRUD.
+	schedules, err := db.ListSchedules(ctx)
+	if err != nil {
+		slog.Warn("load schedules", "err", err)
+	} else {
+		dnsSrv.SetSchedules(schedules)
+		if len(schedules) > 0 {
+			slog.Info("schedules loaded", "count", len(schedules))
+		}
+	}
+	w.OnScheduleChanged = func() {
+		list, err := db.ListSchedules(context.Background())
+		if err != nil {
+			slog.Warn("reload schedules", "err", err)
+			return
+		}
+		dnsSrv.SetSchedules(list)
+	}
+
 	dnsSrv.OnRecord = func(rec dnssrv.Record) {
 		devRes.Feed(devices.Record{ClientIP: rec.ClientIP, TS: rec.TS})
 		w.Broadcast(store.Event{

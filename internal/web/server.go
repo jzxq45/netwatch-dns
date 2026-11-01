@@ -58,6 +58,10 @@ type Store interface {
 	ListRewrites(ctx context.Context) ([]store.DNSRewrite, error)
 	SetRewrite(ctx context.Context, domain, ip string) error
 	DeleteRewrite(ctx context.Context, domain string) error
+	ListSchedules(ctx context.Context) ([]store.Schedule, error)
+	AddSchedule(ctx context.Context, sc store.Schedule) (int64, error)
+	DeleteSchedule(ctx context.Context, id int64) error
+	ToggleSchedule(ctx context.Context, id int64, enabled bool) error
 }
 
 const (
@@ -104,6 +108,9 @@ func New(st Store, log *slog.Logger) *Server {
 	mux.HandleFunc("GET /api/rewrites", s.apiListRewrites)
 	mux.HandleFunc("POST /api/rewrites", s.apiSetRewrite)
 	mux.HandleFunc("DELETE /api/rewrites", s.apiDeleteRewrite)
+	mux.HandleFunc("GET /api/schedules", s.apiListSchedules)
+	mux.HandleFunc("POST /api/schedules", s.apiAddSchedule)
+	mux.HandleFunc("DELETE /api/schedules", s.apiDeleteSchedule)
 	mux.HandleFunc("GET /api/services", s.apiServices)
 	mux.HandleFunc("POST /api/services/toggle", s.apiServiceToggle)
 	mux.HandleFunc("GET /api/safesearch", s.apiSafeSearch)
@@ -148,6 +155,9 @@ type Server struct {
 
 	// OnRewriteChanged applies a saved/deleted DNS rewrite to the live map.
 	OnRewriteChanged func(domain, ip string, deleted bool)
+
+	// OnScheduleChanged reloads bedtime / time-limit rules after CRUD.
+	OnScheduleChanged func()
 
 	// SafeSearch reports whether safe search enforcement is enabled.
 	SafeSearch func() bool

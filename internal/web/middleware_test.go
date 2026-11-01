@@ -59,6 +59,18 @@ func (failingStore) SetRewrite(context.Context, string, string) error {
 func (failingStore) DeleteRewrite(context.Context, string) error {
 	return fixtureErr
 }
+func (failingStore) ListSchedules(context.Context) ([]store.Schedule, error) {
+	return nil, fixtureErr
+}
+func (failingStore) AddSchedule(context.Context, store.Schedule) (int64, error) {
+	return 0, fixtureErr
+}
+func (failingStore) DeleteSchedule(context.Context, int64) error {
+	return fixtureErr
+}
+func (failingStore) ToggleSchedule(context.Context, int64, bool) error {
+	return fixtureErr
+}
 func (failingStore) SetDeviceHostname(context.Context, string, string) error {
 	return fixtureErr
 }

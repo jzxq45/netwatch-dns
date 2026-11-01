@@ -38,6 +38,19 @@ CREATE TABLE IF NOT EXISTS dns_rewrites (
     created_at INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS schedules (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    client_ip  TEXT,
+    target     TEXT,
+    start_hour INT,
+    start_min  INT,
+    end_hour   INT,
+    end_min    INT,
+    days_mask  INT,
+    enabled    INT
+);
+CREATE INDEX IF NOT EXISTS idx_schedules_client ON schedules(client_ip);
+
 CREATE TABLE IF NOT EXISTS flow_log (
     id       INTEGER PRIMARY KEY AUTOINCREMENT,
     src_ip   TEXT,
