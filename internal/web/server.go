@@ -115,6 +115,8 @@ func New(st Store, log *slog.Logger) *Server {
 	mux.HandleFunc("POST /api/services/toggle", s.apiServiceToggle)
 	mux.HandleFunc("GET /api/safesearch", s.apiSafeSearch)
 	mux.HandleFunc("POST /api/safesearch/toggle", s.apiSafeSearchToggle)
+	mux.HandleFunc("GET /api/adult", s.apiAdult)
+	mux.HandleFunc("POST /api/adult/toggle", s.apiAdultToggle)
 	mux.HandleFunc("GET /api/network", s.apiNetwork)
 	mux.HandleFunc("GET /api/qr", s.apiQR)
 	mux.HandleFunc("GET /api/apple.mobileconfig", s.appleMobileConfig)
@@ -164,6 +166,12 @@ type Server struct {
 
 	// OnSafeSearchToggle notifies when safe search is toggled via the web UI.
 	OnSafeSearchToggle func(enabled bool)
+
+	// BlockAdult reports whether 18+/NSFW content blocking is enabled.
+	BlockAdult func() bool
+
+	// OnBlockAdultToggle notifies when 18+ blocking is toggled via the web UI.
+	OnBlockAdultToggle func(enabled bool)
 
 	// DNSExchange routes in-memory DNS queries (e.g. from DoH RFC 8484) through the DNS server.
 	DNSExchange func(r *dns.Msg, clientAddr net.Addr) *dns.Msg
@@ -369,6 +377,7 @@ const contentFeed = `
       <a class="chip link" id="btnOpenRouter" target="_blank" href="#">↗ Роутер</a>
       <button class="chip link" id="btnPhonePair" style="cursor:pointer">📱 Телефон</button>
       <button class="chip link" id="btnSafeSearch" style="cursor:pointer" title="Принудительный безопасный поиск для Google, YouTube, Bing, Yandex, DuckDuckGo">🛡️ SafeSearch: <span id="valSafeSearch">...</span></button>
+      <button class="chip link" id="btnAdultBlock" style="cursor:pointer" title="Блокировка сайтов и платформ для взрослых (18+ / NSFW)">🔞 18+: <span id="valAdultBlock">...</span></button>
       <div class="chip" id="lblBlockStats" title="Активная защита от рекламы и вредоносных доменов">🛡️ Защита: <span id="valBlockedQueries">0</span> угроз (<span id="valBlockedRules">0</span> правил)</div>
       <div class="chip" id="lblCacheStats" title="Доля доменов, отвеченных из локального кэша за всё время">💾 Кэш: <span id="valCacheRatio">0</span>%</div>
       <div class="chip" id="lblStatStats" title="Доля заблокированных запросов за 24 часа (по /api/stats)">🚫 Блок: <span id="valBlockPct">0</span>%</div>
@@ -1257,6 +1266,30 @@ func (s *Server) apiSafeSearchToggle(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.OnSafeSearchToggle != nil {
 		s.OnSafeSearchToggle(body.Enabled)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok", "enabled": body.Enabled}) //nolint:errcheck
+}
+
+func (s *Server) apiAdult(w http.ResponseWriter, r *http.Request) {
+	enabled := false
+	if s.BlockAdult != nil {
+		enabled = s.BlockAdult()
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]bool{"enabled": enabled}) //nolint:errcheck
+}
+
+func (s *Server) apiAdultToggle(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if s.OnBlockAdultToggle != nil {
+		s.OnBlockAdultToggle(body.Enabled)
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok", "enabled": body.Enabled}) //nolint:errcheck

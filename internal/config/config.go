@@ -30,6 +30,7 @@ type Config struct {
 	DoHWindow             string   `yaml:"doh_aggregate_window"`              // e.g. 10s
 	NoiseDomains          []string `yaml:"noise_domains"`                     // bg traffic: noise=1 in db, hidden from stdout/feed
 	SafeSearch            bool     `yaml:"safe_search"`                       // enforce safe search for Google, YouTube, Bing, Yandex, DuckDuckGo
+	BlockAdult            bool     `yaml:"block_adult"`                       // block 18+/NSFW adult platforms
 	WebToken              string   `yaml:"web_token"`                         // when set: web UI needs X-Auth-Token / ?token= / cookie
 }
 
@@ -136,6 +137,10 @@ func overrides(c *Config) []override {
 		}},
 		{"MONITOR_SAFE_SEARCH", func(v string) error {
 			c.SafeSearch = v == "1" || strings.EqualFold(v, "true")
+			return nil
+		}},
+		{"MONITOR_BLOCK_ADULT", func(v string) error {
+			c.BlockAdult = v == "1" || strings.EqualFold(v, "true")
 			return nil
 		}},
 		{"MONITOR_WEB_TOKEN", func(v string) error { c.WebToken = v; return nil }},

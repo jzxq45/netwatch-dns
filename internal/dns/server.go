@@ -87,6 +87,7 @@ type Config struct {
 	BlocklistRefreshHours int      // periodic refresh; 0 disables
 	NoiseDomains          []string // non-nil replaces defaultNoiseDomains
 	SafeSearch            bool     // enforce safe search for Google, YouTube, Bing, etc.
+	BlockAdult            bool     // block 18+/NSFW adult platforms
 	SearchSuffixes        []string // LAN search suffixes stripped from logged names only
 	DoHLogLevel           string   // debug|info|off for dns_blocked_doh lines
 	DoHWindow             string   // aggregation window, e.g. "10s"
@@ -143,6 +144,10 @@ type Server struct {
 
 	// safeSearch controls runtime safe-search rewriting for search engines.
 	safeSearch atomic.Bool
+
+	// adultFilter tracks 18+/NSFW platform domains.
+	adultFilter *filter.AdultFilter
+	blockAdult  atomic.Bool
 
 	// inflight bounds concurrent handlers (admission control; DNSInflight is
 	// the observable mirror).
@@ -223,8 +228,10 @@ func New(cfg Config, db *sql.DB, log *slog.Logger) *Server {
 		rewrites:         make(map[string]string),
 		aiEngine:         filter.NewAIEngine(),
 		schedules:        NewScheduleEngine(),
+		adultFilter:      filter.NewAdultFilter(),
 	}
 	s.safeSearch.Store(cfg.SafeSearch)
+	s.blockAdult.Store(cfg.BlockAdult)
 	return s
 }
 
@@ -293,6 +300,16 @@ func (s *Server) SafeSearch() bool {
 // SetSafeSearch dynamically toggles search engine safe-search enforcement.
 func (s *Server) SetSafeSearch(enabled bool) {
 	s.safeSearch.Store(enabled)
+}
+
+// BlockAdult reports whether 18+ content blocking is active.
+func (s *Server) BlockAdult() bool {
+	return s.blockAdult.Load()
+}
+
+// SetBlockAdult dynamically toggles 18+ content blocking.
+func (s *Server) SetBlockAdult(enabled bool) {
+	s.blockAdult.Store(enabled)
 }
 
 type dohResponseWriter struct {
@@ -730,7 +747,8 @@ func (s *Server) handle(w dns.ResponseWriter, r *dns.Msg) {
 	if rewritten == nil && s.safeSearch.Load() {
 		rewritten = filter.SafeSearchRewrite(r)
 	}
-	blocklisted := rewritten == nil && s.isBlocked(q.Name)
+	adultBlocked := rewritten == nil && s.blockAdult.Load() && s.adultFilter.Match(q.Name)
+	blocklisted := rewritten == nil && (s.isBlocked(q.Name) || adultBlocked)
 	// Bedtime / time-limit rules are evaluated before AI heuristics and are
 	// treated like blocklist hits (NXDOMAIN, noise=1) — but logged separately
 	// so schedule-driven blocks stay distinguishable from DoH ones.
@@ -753,12 +771,12 @@ func (s *Server) handle(w dns.ResponseWriter, r *dns.Msg) {
 	} else {
 		s.log.Info("dns query", "client", srcIP, "domain", domain, "qtype", dns.TypeToString[q.Qtype], "ts", ts)
 	}
-	rec.Noise = noisy || blocked || aiBlocked
+	rec.Noise = noisy || blocked || aiBlocked || adultBlocked
 	if s.OnRecord != nil {
 		s.OnRecord(rec)
 	}
 	noiseFlag := 0
-	if noisy || blocked || aiBlocked {
+	if noisy || blocked || aiBlocked || adultBlocked {
 		noiseFlag = 1 // blocked/AI-denied attempts are noise in the feed, too
 	}
 	if !s.snk.TrySend(store.DNSRow{

@@ -49,6 +49,7 @@ func Run(ctx context.Context, cfg config.Config) error {
 		DoHLogLevel:           cfg.DoHLogLevel,
 		DoHWindow:             cfg.DoHWindow,
 		SafeSearch:            cfg.SafeSearch,
+		BlockAdult:            cfg.BlockAdult,
 	}, db.DB(), slog.Default())
 	devRes := devices.New(db, slog.Default())
 	w := web.New(db, slog.Default())
@@ -56,6 +57,8 @@ func Run(ctx context.Context, cfg config.Config) error {
 	w.RulesCount = dnsSrv.BlockedRulesCount
 	w.SafeSearch = dnsSrv.SafeSearch
 	w.OnSafeSearchToggle = dnsSrv.SetSafeSearch
+	w.BlockAdult = dnsSrv.BlockAdult
+	w.OnBlockAdultToggle = dnsSrv.SetBlockAdult
 	w.DNSExchange = dnsSrv.ExchangeDoH
 
 	rules, err := db.ListCustomRules(ctx)

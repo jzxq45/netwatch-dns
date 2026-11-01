@@ -178,6 +178,44 @@
       });
     }
 
+    // 18+ Adult content blocking toggle button
+    var btnAdultBlock = document.getElementById('btnAdultBlock');
+    var valAdultBlock = document.getElementById('valAdultBlock');
+    if (btnAdultBlock && valAdultBlock) {
+      var adultBlockActive = false;
+      function paintAdultBlock(on) {
+        adultBlockActive = on;
+        valAdultBlock.textContent = on ? 'Вкл' : 'Выкл';
+        if (on) {
+          btnAdultBlock.style.borderColor = '#ff8080';
+          btnAdultBlock.style.color = '#ff8080';
+        } else {
+          btnAdultBlock.style.borderColor = 'var(--line)';
+          btnAdultBlock.style.color = 'var(--text)';
+        }
+      }
+      fetch('/api/adult')
+        .then(function (r) { return r.json(); })
+        .then(function (d) { paintAdultBlock(!!d.enabled); })
+        .catch(function (err) { console.warn('adult fetch error:', err); });
+
+      btnAdultBlock.addEventListener('click', function () {
+        btnAdultBlock.disabled = true;
+        fetch('/api/adult/toggle', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ enabled: !adultBlockActive })
+        })
+        .then(function (r) { return r.json(); })
+        .then(function (d) { paintAdultBlock(!!d.enabled); })
+        .catch(function (err) {
+          console.error('adult toggle error:', err);
+          alert('Ошибка переключения блокировки 18+');
+        })
+        .finally(function () { btnAdultBlock.disabled = false; });
+      });
+    }
+
     // 1-click service blocking chips (YouTube, TikTok, ...).
     fetch('/api/services')
       .then(function (r) { return r.json(); })
