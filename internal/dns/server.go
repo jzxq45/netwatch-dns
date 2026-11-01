@@ -86,6 +86,7 @@ type Config struct {
 	BlocklistURLs         []string // remote hosts/adblock lists (cached on disk)
 	BlocklistRefreshHours int      // periodic refresh; 0 disables
 	NoiseDomains          []string // non-nil replaces defaultNoiseDomains
+	SafeSearch            bool     // enforce safe search for Google, YouTube, Bing, etc.
 	SearchSuffixes        []string // LAN search suffixes stripped from logged names only
 	DoHLogLevel           string   // debug|info|off for dns_blocked_doh lines
 	DoHWindow             string   // aggregation window, e.g. "10s"
@@ -135,6 +136,9 @@ type Server struct {
 	// RWMutex, never nil after New.
 	rewritesMu sync.RWMutex
 	rewrites   map[string]string
+
+	// safeSearch controls runtime safe-search rewriting for search engines.
+	safeSearch atomic.Bool
 
 	// inflight bounds concurrent handlers (admission control; DNSInflight is
 	// the observable mirror).
@@ -192,7 +196,7 @@ func New(cfg Config, db *sql.DB, log *slog.Logger) *Server {
 	if cfg.BlocklistRefreshHours > 0 {
 		refreshEvery = time.Duration(cfg.BlocklistRefreshHours) * time.Hour
 	}
-	return &Server{
+	s := &Server{
 		upstream:         cfg.Upstream,
 		fallbackUpstream: cfg.FallbackUpstream,
 		log:              log,
@@ -215,6 +219,8 @@ func New(cfg Config, db *sql.DB, log *slog.Logger) *Server {
 		rewrites:         make(map[string]string),
 		aiEngine:         filter.NewAIEngine(),
 	}
+	s.safeSearch.Store(cfg.SafeSearch)
+	return s
 }
 
 // normalizeEntries lowercases, trims spaces and drops trailing dots so the
@@ -272,6 +278,16 @@ func (s *Server) ApplyCustomRule(domain, action string) {
 // RemoveCustomRule drops a runtime override from both rule sets.
 func (s *Server) RemoveCustomRule(domain string) {
 	s.blockMatcher.RemoveRule(domain)
+}
+
+// SafeSearch reports whether search engine safe-search enforcement is active.
+func (s *Server) SafeSearch() bool {
+	return s.safeSearch.Load()
+}
+
+// SetSafeSearch dynamically toggles search engine safe-search enforcement.
+func (s *Server) SetSafeSearch(enabled bool) {
+	s.safeSearch.Store(enabled)
 }
 
 // rewriteTTL is the TTL for locally synthesized rewrite answers.
@@ -680,6 +696,9 @@ func (s *Server) handle(w dns.ResponseWriter, r *dns.Msg) {
 	// Local rewrite wins over everything below (blocklist + upstream): the
 	// answer is synthesized here and no external resolver is contacted.
 	rewritten := s.rewriteResponse(r)
+	if rewritten == nil && s.safeSearch.Load() {
+		rewritten = filter.SafeSearchRewrite(r)
+	}
 	blocked := rewritten == nil && s.isBlocked(q.Name)
 	noisy := s.isNoise(domain)
 	// Heuristic AI shield: names that are neither locally rewritten nor

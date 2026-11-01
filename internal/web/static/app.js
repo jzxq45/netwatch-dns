@@ -140,6 +140,44 @@
       })
       .catch(function (err) { console.warn('stats fetch error:', err); });
 
+    // SafeSearch toggle button
+    var btnSafeSearch = document.getElementById('btnSafeSearch');
+    var valSafeSearch = document.getElementById('valSafeSearch');
+    if (btnSafeSearch && valSafeSearch) {
+      var safeSearchActive = false;
+      function paintSafeSearch(on) {
+        safeSearchActive = on;
+        valSafeSearch.textContent = on ? 'Вкл' : 'Выкл';
+        if (on) {
+          btnSafeSearch.style.borderColor = '#44cc88';
+          btnSafeSearch.style.color = '#44cc88';
+        } else {
+          btnSafeSearch.style.borderColor = 'var(--line)';
+          btnSafeSearch.style.color = 'var(--text)';
+        }
+      }
+      fetch('/api/safesearch')
+        .then(function (r) { return r.json(); })
+        .then(function (d) { paintSafeSearch(!!d.enabled); })
+        .catch(function (err) { console.warn('safesearch fetch error:', err); });
+
+      btnSafeSearch.addEventListener('click', function () {
+        btnSafeSearch.disabled = true;
+        fetch('/api/safesearch/toggle', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ enabled: !safeSearchActive })
+        })
+        .then(function (r) { return r.json(); })
+        .then(function (d) { paintSafeSearch(!!d.enabled); })
+        .catch(function (err) {
+          console.error('safesearch toggle error:', err);
+          alert('Ошибка переключения SafeSearch');
+        })
+        .finally(function () { btnSafeSearch.disabled = false; });
+      });
+    }
+
     // 1-click service blocking chips (YouTube, TikTok, ...).
     fetch('/api/services')
       .then(function (r) { return r.json(); })

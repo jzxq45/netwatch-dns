@@ -48,11 +48,14 @@ func Run(ctx context.Context, cfg config.Config) error {
 		SearchSuffixes:        cfg.SearchSuffixes,
 		DoHLogLevel:           cfg.DoHLogLevel,
 		DoHWindow:             cfg.DoHWindow,
+		SafeSearch:            cfg.SafeSearch,
 	}, db.DB(), slog.Default())
 	devRes := devices.New(db, slog.Default())
 	w := web.New(db, slog.Default())
 	w.Token = cfg.WebToken
 	w.RulesCount = dnsSrv.BlockedRulesCount
+	w.SafeSearch = dnsSrv.SafeSearch
+	w.OnSafeSearchToggle = dnsSrv.SetSafeSearch
 
 	rules, err := db.ListCustomRules(ctx)
 	if err != nil {

@@ -29,6 +29,7 @@ type Config struct {
 	DoHLogLevel           string   `yaml:"doh_log_level"`                     // debug|info|off for dns_blocked_doh
 	DoHWindow             string   `yaml:"doh_aggregate_window"`              // e.g. 10s
 	NoiseDomains          []string `yaml:"noise_domains"`                     // bg traffic: noise=1 in db, hidden from stdout/feed
+	SafeSearch            bool     `yaml:"safe_search"`                       // enforce safe search for Google, YouTube, Bing, Yandex, DuckDuckGo
 	WebToken              string   `yaml:"web_token"`                         // when set: web UI needs X-Auth-Token / ?token= / cookie
 }
 
@@ -131,6 +132,10 @@ func overrides(c *Config) []override {
 				return fmt.Errorf("MONITOR_RETENTION_DAYS: %w", err)
 			}
 			c.RetentionDays = n
+			return nil
+		}},
+		{"MONITOR_SAFE_SEARCH", func(v string) error {
+			c.SafeSearch = v == "1" || strings.EqualFold(v, "true")
 			return nil
 		}},
 		{"MONITOR_WEB_TOKEN", func(v string) error { c.WebToken = v; return nil }},
